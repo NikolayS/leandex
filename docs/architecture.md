@@ -3,10 +3,10 @@
 ## Requirements
 
 1. **Self-contained** - Everything inside Postgres
-2. **Non-blocking** - `REINDEX INDEX CONCURRENTLY` only
-3. **Universal** - Works on managed services (no superuser)
-4. **Secure** - No plaintext passwords
-5. **Not only btree** - Support btree, GIN, GiST, HNSW and so on (BRIN currently excluded due to [Postgres bug #17205](https://www.postgresql.org/message-id/flat/17205-42b1d8f131f0cf97%40postgresql.org))
+2. **Low-lock rebuilds** - uses `REINDEX INDEX CONCURRENTLY` only
+3. **Managed-service oriented** - works where `CREATE DATABASE`, `dblink`, and `postgres_fdw` are available
+4. **Safer connection handling** - uses `postgres_fdw` user mappings instead of plaintext dblink connection strings
+5. **Not only btree** - designed for common index methods; BRIN is currently excluded due to [Postgres bug #17205](https://www.postgresql.org/message-id/flat/17205-42b1d8f131f0cf97%40postgresql.org)
 
 ## Design decisions
 
@@ -21,7 +21,7 @@ We support two deployment scenarios:
 `REINDEX INDEX CONCURRENTLY` cannot run in transaction blocks. `dblink` creates separate connection to execute reindex operations without blocking the control session.
 
 ### `postgres_fdw` for authentication
-Provides secure credential storage via user mappings. Eliminates plaintext passwords in connection strings and removes superuser requirements.
+Uses `postgres_fdw` user mappings so dblink connects by server name instead of embedding plaintext passwords in dblink connection strings. Access to foreign servers and user mappings should be restricted to admin roles.
 
 ### Separate control database
 Prevents deadlocks during reindex operations. Control database (`index_pilot_control`) manages all tracking while target databases remain clean without any `leandex` installation.
@@ -58,26 +58,29 @@ graph TB
 
 ## How it works
 
-Fire-and-forget approach:
+Operator-controlled maintenance loop:
 
-1. Control database contains `leandex` functions
-2. `postgres_fdw` stores credentials securely
+1. Control database contains `index_pilot` schema and leandex functions
+2. `postgres_fdw` user mappings hold target credentials, avoiding plaintext dblink connection strings
 3. `dblink` executes `REINDEX INDEX CONCURRENTLY`
 4. Bloat detection using Maxim Boguk's formula
 5. `pg_cron` triggers periodic scans
 
 ## Compatibility
 
-**Works:**
+**Known target environments:**
 - Self-managed Postgres 13+
 - AWS RDS/Aurora
-- Google Cloud SQL
-- Azure Database
 - Supabase
-- Any other managed Postgres or Postgres-compatible DBMS (including AWS Aurora, GCP AlloyDB) where `CREATE DATABASE`, `dblink`, and `postgres_fdw` are available
 
-**Doesn't work:**
-- TigerData, formerly Timescale Cloud (no `CREATE DATABASE`)
+**Needs dedicated validation before claiming support:**
+- Google Cloud SQL
+- Azure Database for PostgreSQL
+- Crunchy Bridge
+- AlloyDB and other Postgres-compatible services
+
+**Known limitation:**
+- Services without `CREATE DATABASE`, `dblink`, or `postgres_fdw` support are not suitable for the current control-database design.
 
 **Extensions:**
 - `dblink` (required)
@@ -93,7 +96,7 @@ bloat_indicator = index_size / pg_class.reltuples
 ```
 
 **Advantages:**
-- Works with any index type (btree, GIN, GiST, hash, HNSW) except BRIN (excluded due to [Postgres bug #17205](https://www.postgresql.org/message-id/flat/17205-42b1d8f131f0cf97%40postgresql.org))
+- Designed for common index methods such as btree, GIN, GiST, hash, and HNSW; BRIN is excluded due to [Postgres bug #17205](https://www.postgresql.org/message-id/flat/17205-42b1d8f131f0cf97%40postgresql.org)
 - Lightweight - no expensive table scans
 - Better precision for fixed-width columns
 - No superuser required

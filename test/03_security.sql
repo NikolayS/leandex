@@ -117,7 +117,7 @@ begin
   if _password_count > 0 then
     raise exception 'FAIL: Found % potential password entries in config', _password_count;
   end if;
-  raise notice 'PASS: No plaintext passwords in configuration';
+  raise notice 'PASS: No password-like entries in leandex configuration';
 end $$;
 
 -- 7. Test privilege escalation prevention

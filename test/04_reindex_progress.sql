@@ -67,7 +67,7 @@ begin
   from index_pilot._remote_get_indexes_info(_target_db, 'test_reindex', 'test_table', 'idx_test_data')
   limit 1;
   
-  -- Insert record with null values (as fire-and-forget reindex would)
+  -- Insert record with null progress values (as asynchronous reindex tracking can do)
   insert into index_pilot.reindex_history (
     datname, schemaname, relname, indexrelname,
     indexsize_before, indexsize_after, estimated_tuples, 

@@ -185,7 +185,7 @@ if [[ "${SKIP_INSTALL}" != "true" ]]; then
   # In CI/Docker, we need to find the right hostname for FDW to connect
   FDW_SETUP_SUCCESS=false
 
-  # In GitLab CI, the postgres service is accessible via 'postgres' hostname
+  # In CI, the postgres service is accessible via 'postgres' hostname
   # But FDW needs to connect from within the database, so we need the right internal hostname
   if [[ "${DB_HOST}" == "postgres" ]]; then
     # In CI, try postgres first (service name), then localhost for loopback
@@ -256,7 +256,7 @@ if [[ "${SKIP_INSTALL}" != "true" ]]; then
       echo "FDW connection failed with 'postgres', trying Docker network IP..."
 
       # Get the actual IP of the postgres container in Docker network
-      # In GitLab CI, containers can reach each other via Docker network IPs
+      # In CI, containers can reach each other via Docker network IPs
       # Remove CIDR notation if present (e.g., 172.17.0.3/32 -> 172.17.0.3)
       POSTGRES_IP=$(psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -tAc "SELECT host(inet_server_addr())" 2> /dev/null || echo "")
 

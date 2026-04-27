@@ -49,7 +49,7 @@ returns table(
 ```
 
 Notes:
-- `estimated_bloat` is computed as `indexsize / (best_ratio * estimated_tuples)` using cached state in `index_pilot.index_current_state`.
+- `estimated_bloat` is computed as `indexsize / (best_ratio * estimated_tuples)` using cached state in `index_pilot.index_latest_state`.
 - Immediately after baseline initialization (see `do_force_populate_index_stats`) `estimated_bloat` will be ~1.0 by definition; it grows as indexes bloat further.
 
 ### Non-Superuser Mode Functions
@@ -94,49 +94,17 @@ function index_pilot.set_or_replace_setting(
 
 ### FDW and connection setup
 
-#### `index_pilot.setup_fdw_self_connection()`
-Creates or ensures the foreign server for self-connection.
+#### `index_pilot._connect_securely()`
+Internal helper that opens a dblink connection to a registered target database using the target's `postgres_fdw` server and current-user mapping.
+
 ```sql
-function index_pilot.setup_fdw_self_connection(
-  _host text default 'localhost',
-  _port integer default null,
-  _dbname text default null
-) returns text
+function index_pilot._connect_securely(_datname name) returns void
 ```
 
-#### `index_pilot.setup_user_mapping()`
-Creates or updates user mapping with password.
-```sql
-function index_pilot.setup_user_mapping(
-  _username text default null,
-  _password text default null
-) returns text
-```
-
-#### `index_pilot.setup_connection()`
-Configures secure connection via postgres_fdw user mapping.
-```sql
-function index_pilot.setup_connection(
-  _host text,
-  _port integer default 5432,
-  _username text default 'index_pilot',
-  _password text default null
-) returns text
-```
-
-#### `index_pilot.setup_fdw_complete()`
-One-shot helper: server, user mapping, connection test.
-```sql
-function index_pilot.setup_fdw_complete(
-  _password text,
-  _host text default 'localhost',
-  _port integer default null,
-  _username text default null
-) returns table(step text, result text)
-```
+Normal users should prefer `./leandex register-target`, which creates the foreign server, user mapping, and `index_pilot.target_databases` entry.
 
 #### `index_pilot.check_fdw_security_status()`
-Checks security-related FDW components.
+Checks FDW-related setup status.
 ```sql
 function index_pilot.check_fdw_security_status()
 returns table(component text, status text, details text)

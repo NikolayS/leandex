@@ -2,7 +2,7 @@
 
 ## Overview
 
-This directory contains the automated test suite for leandex. The tests are designed to run in CI/CD pipelines (GitLab CI) and can also be executed locally for development.
+This directory contains the automated test suite for leandex. The tests are designed to run in CI/CD pipelines (GitHub Actions) and can also be executed locally for development.
 
 ## Test Structure
 
@@ -16,7 +16,7 @@ This directory contains the automated test suite for leandex. The tests are desi
   - Handles PostgreSQL connection
   - Runs tests in sequence
   - Generates JUnit XML output for CI
-  - Supports multiple PostgreSQL versions (12+)
+  - Supports multiple PostgreSQL versions (13+)
 
 ## Running Tests Locally
 
@@ -62,11 +62,10 @@ export DB_PASS=mypass
 
 ## CI/CD Integration
 
-### GitLab CI
-The project includes `.gitlab-ci.yml` which:
+### GitHub Actions
+The project includes `.github/workflows/ci.yml` which:
 - Tests against PostgreSQL versions 13, 14, 15, 16, 17, and 18
 - Runs security scans for hardcoded passwords and SQL injection
-- Tests non-superuser mode (simulating managed services)
 - Generates JUnit reports for test visualization
 
 ### Running in Docker
@@ -144,7 +143,7 @@ Current test coverage includes:
 3. **Test failures**
    - Check `test-results.xml` for detailed error messages
    - Review `/tmp/test_output.log` for full output
-   - Ensure PostgreSQL version is 12+
+   - Ensure PostgreSQL version is 13+
 
 ### Debug Mode
 ```bash

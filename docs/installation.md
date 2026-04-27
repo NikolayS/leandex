@@ -4,7 +4,7 @@
 
 ```bash
 # Clone the repository
-git clone https://gitlab.com/postgres-ai/leandex
+git clone https://github.com/NikolayS/leandex.git
 cd leandex
 
 # 1) Install into control database (auto-creates DB, installs extensions/objects)
@@ -68,7 +68,7 @@ The split `index_pilot_*.sql` files are kept for development and reviewable diff
 
 ```bash
 # Clone the repository
-git clone https://gitlab.com/postgres-ai/leandex
+git clone https://github.com/NikolayS/leandex.git
 cd leandex
 
 # 1. Create control database (as admin user)
@@ -78,10 +78,8 @@ psql -h your-instance.region.rds.amazonaws.com -U postgres -c "create database i
 psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -c "CREATE EXTENSION IF NOT EXISTS postgres_fdw;"
 psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -c "CREATE EXTENSION IF NOT EXISTS dblink;"
 
-# 3. Install schema and functions in control database
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -f index_pilot_tables.sql
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -f index_pilot_functions.sql
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -f index_pilot_fdw.sql
+# 3. Install leandex in the control database
+psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -f leandex.sql
 
 # 4. Create FDW server and user mapping for the TARGET database
 #    fdw_server_name must refer to a foreign server that points to the TARGET DB
@@ -116,7 +114,7 @@ psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_contro
 
 ```bash
 # Clone the repository
-git clone https://gitlab.com/postgres-ai/leandex
+git clone https://github.com/NikolayS/leandex.git
 cd leandex
 
 # 1. Create control database (as superuser)
@@ -126,16 +124,10 @@ psql -U postgres -c "create database index_pilot_control;"
 psql -U postgres -d index_pilot_control -c "CREATE EXTENSION IF NOT EXISTS postgres_fdw;"
 psql -U postgres -d index_pilot_control -c "CREATE EXTENSION IF NOT EXISTS dblink;"
 
-# 3. Install schema and functions in control database (as superuser)
-psql -U postgres -d index_pilot_control -f index_pilot_tables.sql
-psql -U postgres -d index_pilot_control -f index_pilot_functions.sql
-psql -U postgres -d index_pilot_control -f index_pilot_fdw.sql
+# 3. Install leandex in the control database (as superuser)
+psql -U postgres -d index_pilot_control -f leandex.sql
 
-# 4. Setup FDW connection infrastructure (as superuser; self-connection in control DB)
-psql -U postgres -d index_pilot_control \
-  -c "select index_pilot.setup_connection('127.0.0.1', 5432, 'postgres', 'postgres');"  # Use actual password
-
-# 5. Create FDW server and user mapping for the TARGET database
+# 4. Create FDW server and user mapping for the TARGET database
 psql -U postgres -d index_pilot_control <<'SQL'
 create server if not exists target_your_database foreign data wrapper postgres_fdw
   options (host '127.0.0.1', port '5432', dbname 'your_database');
@@ -144,7 +136,7 @@ create user mapping if not exists for current_user server target_your_database
   options (user 'remote_owner_or_role', password 'remote_password');
 SQL
 
-# 6. Register the TARGET database (links index_pilot.target_databases to your FDW server)
+# 5. Register the TARGET database (links index_pilot.target_databases to your FDW server)
 psql -U postgres -d index_pilot_control <<'SQL'
 insert into index_pilot.target_databases(database_name, host, port, fdw_server_name, enabled)
 values ('your_database', '127.0.0.1', 5432, 'target_your_database', true)
@@ -152,7 +144,7 @@ on conflict (database_name) do update
   set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;
 SQL
 
-# 7. Verify
+# 6. Verify
 psql -U postgres -d index_pilot_control -c "select * from index_pilot.check_fdw_security_status()"
 psql -U postgres -d index_pilot_control -c "select * from index_pilot.check_environment();"
 ```

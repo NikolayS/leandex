@@ -125,7 +125,7 @@ View history:
 ```sql
 select *
 from index_pilot.history
-order by entry_timestamp desc
+order by ts desc
 limit 20;
 ```
 
