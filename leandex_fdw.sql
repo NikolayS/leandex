@@ -11,7 +11,7 @@ set client_min_messages to warning;
  * Establish secure dblink connection to target database via postgres_fdw
  * Uses FDW user mapping for secure credentials, prevents deadlocks, auto-reconnects
  */
-create function index_pilot._connect_securely(
+create function leandex._connect_securely(
   _datname name
 ) returns void as
 $body$
@@ -31,7 +31,7 @@ begin
   if _datname = any(dblink_get_connections()) then
     perform dblink_disconnect(_datname);
   end if;
-    
+
   -- Use ONLY postgres_fdw with user mapping (secure approach)
   -- Password is stored securely in PostgreSQL catalog, not in plain text
   declare
@@ -40,14 +40,14 @@ begin
     -- Control database architecture is REQUIRED - get the FDW server for the target database
     select fdw_server_name
     into _fdw_server_name
-    from index_pilot.target_databases
+    from leandex.target_databases
     where database_name = _datname
     and enabled = true;
-        
+
     if _fdw_server_name is null then
       raise exception using
         message = format(
-          'Target database %s not registered or not enabled in index_pilot.target_databases.',
+          'Target database %s not registered or not enabled in leandex.target_databases.',
           _datname
         ),
         hint = 'Control database setup required.';
@@ -74,7 +74,7 @@ language plpgsql;
  * Establish secure dblink connection if not already connected
  * Creates secure FDW connection only if needed, handles null connections case
  */
-create function index_pilot._dblink_connect_if_not(
+create function leandex._dblink_connect_if_not(
   _datname name
 ) returns void as
 $body$
@@ -82,9 +82,9 @@ begin
   -- Use secure FDW connection if not already connected
   -- Handle null case when no connections exist
   if dblink_get_connections() is null or not (_datname = any(dblink_get_connections())) then
-    perform index_pilot._connect_securely(_datname);
+    perform leandex._connect_securely(_datname);
   end if;
-  
+
   return;
 end;
 $body$
@@ -95,7 +95,7 @@ language plpgsql;
  * Comprehensive postgres_fdw security setup validation
  * Validates FDW configuration components with detailed status and guidance
  */
-create function index_pilot.check_fdw_security_status() returns table(
+create function leandex.check_fdw_security_status() returns table(
   component text,
   status text,
   details text
@@ -103,31 +103,31 @@ create function index_pilot.check_fdw_security_status() returns table(
 $body$
 begin
   -- Check postgres_fdw extension
-  return query select 
+  return query select
     'postgres_fdw extension'::text,
-    case when exists (select from pg_extension where extname = 'postgres_fdw') 
+    case when exists (select from pg_extension where extname = 'postgres_fdw')
       then 'INSTALLED' else 'MISSING' end::text,
-    case when exists (select from pg_extension where extname = 'postgres_fdw') 
-      then 'Extension is available for use' 
+    case when exists (select from pg_extension where extname = 'postgres_fdw')
+      then 'Extension is available for use'
       else 'Run: create extension postgres_fdw;' end::text;
-      
+
   -- Check FDW usage privilege
-  return query select 
+  return query select
     'FDW usage privilege'::text,
-    case when has_foreign_data_wrapper_privilege(current_user, 'postgres_fdw', 'usage') 
+    case when has_foreign_data_wrapper_privilege(current_user, 'postgres_fdw', 'usage')
       then 'GRANTED' else 'DENIED' end::text,
-    case when has_foreign_data_wrapper_privilege(current_user, 'postgres_fdw', 'usage') 
+    case when has_foreign_data_wrapper_privilege(current_user, 'postgres_fdw', 'usage')
       then format('User %s can use postgres_fdw', current_user)
       else format('Run: grant usage on foreign data wrapper postgres_fdw to %s;', current_user) end::text;
-  
+
   -- Check target servers registered
-  return query select 
+  return query select
     'Target servers registered'::text,
     case
-      when exists (select from index_pilot.target_databases) then 'YES'
+      when exists (select from leandex.target_databases) then 'YES'
       else 'NO'
     end::text,
-    'Register targets: (SQL) create server + user mapping + insert into index_pilot.target_databases; or use index_pilot.sh register-target'::text;
+    'Register targets: (SQL) create server + user mapping + insert into leandex.target_databases; or use leandex.sh register-target'::text;
 
   -- Check user mapping for current user on at least one target server
   return query select
@@ -139,7 +139,7 @@ begin
         um.usename = current_user
         and um.srvname in (
           select fdw_server_name
-          from index_pilot.target_databases
+          from leandex.target_databases
           where enabled
         )
     ) then
@@ -150,28 +150,28 @@ begin
     'Create mapping: create user mapping for current_user server <server> options (user ''<remote_user>'', password ''<password>'');'::text;
 
   -- Overall security status
-  return query select 
+  return query select
     'Overall security status'::text,
     case when (
       exists (select from pg_extension where extname = 'postgres_fdw') and
       has_foreign_data_wrapper_privilege(current_user, 'postgres_fdw', 'usage') and
-      exists (select 1 from index_pilot.target_databases) and
+      exists (select 1 from leandex.target_databases) and
       exists (
         select 1 from pg_user_mappings um
         where
           um.usename = current_user
-          and um.srvname in (select fdw_server_name from index_pilot.target_databases where enabled)
+          and um.srvname in (select fdw_server_name from leandex.target_databases where enabled)
       )
     ) then 'SECURE' else 'SETUP_REQUIRED' end::text,
     case when (
       exists (select from pg_extension where extname = 'postgres_fdw') and
       has_foreign_data_wrapper_privilege(current_user, 'postgres_fdw', 'usage') and
-      exists (select 1 from index_pilot.target_databases) and
+      exists (select 1 from leandex.target_databases) and
       exists (
         select 1 from pg_user_mappings um
         where
           um.usename = current_user
-          and um.srvname in (select fdw_server_name from index_pilot.target_databases where enabled)
+          and um.srvname in (select fdw_server_name from leandex.target_databases where enabled)
       )
     ) then 'All FDW components are properly configured'
       else 'Complete the missing setup steps above' end::text;

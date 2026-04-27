@@ -2,11 +2,11 @@
 -- This script completely removes leandex from your database
 -- WARNING: This will delete all collected statistics and history!
 
--- 1. Drop all FDW servers registered in index_pilot.target_databases
+-- 1. Drop all FDW servers registered in leandex.target_databases
 do $$
 declare r record;
 begin
-  for r in select distinct fdw_server_name from index_pilot.target_databases loop
+  for r in select distinct fdw_server_name from leandex.target_databases loop
     begin
       execute format('drop server if exists %I cascade', r.fdw_server_name);
     exception when others then
@@ -18,7 +18,7 @@ exception when undefined_table then
 end $$;
 
 -- 2. Drop the schema cascade (this removes all objects)
-drop schema if exists index_pilot cascade;
+drop schema if exists leandex cascade;
 
 -- 3. Note about invalid indexes
 -- Invalid _ccnew* indexes might exist from failed reindex operations
@@ -29,8 +29,8 @@ declare
   r record;
   count int := 0;
 begin
-  for r in 
-    select n.nspname, i.relname 
+  for r in
+    select n.nspname, i.relname
     from pg_index idx
     join pg_class i on i.oid = idx.indexrelid
     join pg_namespace n on n.oid = i.relnamespace

@@ -7,7 +7,7 @@ set client_min_messages to warning;
  * Get current version of leandex
  * Returns version string for compatibility checks and diagnostics
  */
-create function index_pilot.version() returns text as $body$
+create function leandex.version() returns text as $body$
   select '0.1.beta1';
 $body$ language sql immutable;
 
@@ -16,7 +16,7 @@ $body$ language sql immutable;
  * Check if PostgreSQL version has critical REINDEX CONCURRENTLY bugs fixed
  * Returns true for PG versions safe for concurrent reindexing (12.10+, 13.6+, 14.4+)
  */
-create function index_pilot._check_pg_version_bugfixed() returns boolean as
+create function leandex._check_pg_version_bugfixed() returns boolean as
 $body$
   /* Fixes not covered here:
        - 17.6, 16.10: fix in BRIN (rebuild required) -- we don't support BRIN yet
@@ -55,7 +55,7 @@ language sql;
  * Check if PostgreSQL 14 version has critical REINDEX CONCURRENTLY bug fixed
  * Returns false for dangerous PG 14.0-14.3 versions (bug #17485)
  */
-create function index_pilot._check_pg14_version_bugfixed() returns boolean as
+create function leandex._check_pg14_version_bugfixed() returns boolean as
 $body$
   select
     current_setting('server_version_num')::integer < 140000
@@ -67,10 +67,10 @@ language sql;
  * Validate PostgreSQL version safety and raise appropriate warnings/errors
  * Raises EXCEPTION for PG 14.0-14.3, WARNING for other affected versions
  */
-create function index_pilot._validate_pg_version() returns void as
+create function leandex._validate_pg_version() returns void as
 $body$
 begin
-  if not index_pilot._check_pg14_version_bugfixed() then
+  if not leandex._check_pg14_version_bugfixed() then
     raise exception using
       message = format(
         'The database version %s is affected by PostgreSQL BUG #17485 which makes using leandex unsafe, please update to latest minor release.',
@@ -79,13 +79,13 @@ begin
       detail = 'See https://www.postgresql.org/message-id/202205251144.6t4urostzc3s@alvherre.pgsql';
   end if;
 
-  if not index_pilot._check_pg_version_bugfixed() then
+  if not leandex._check_pg_version_bugfixed() then
     raise warning using
       message = format(
         'The database version %s is affected by PostgreSQL bugs which make using leandex potentially unsafe, please update to latest minor release.',
         current_setting('server_version')
       ),
-      detail = 
+      detail =
         'See https://www.postgresql.org/message-id/E1mumI4-0001Zp-PB@gemulon.postgresql.org '
         'and https://www.postgresql.org/message-id/E1n8C7O-00066j-Q5@gemulon.postgresql.org';
   end if;
@@ -106,7 +106,7 @@ begin
   end if;
 
   -- Validate PostgreSQL version safety
-  perform index_pilot._validate_pg_version();
+  perform leandex._validate_pg_version();
 end;
 $$;
 
@@ -114,7 +114,7 @@ $$;
  * Comprehensive environment validation for leandex setup
  * Complete preflight check: version, extensions, schema, permissions, FDW connectivity
  */
-create function index_pilot.check_environment()
+create function leandex.check_environment()
 returns table(
   component text,
   is_ok boolean,
@@ -127,37 +127,37 @@ declare
   _fdw_self_ok boolean := false;
 begin
   -- PostgreSQL version
-  return query select 
+  return query select
     'PostgreSQL version (>=13)'::text,
     (current_setting('server_version_num')::int >= 130000),
     current_setting('server_version');
 
   -- Known bugfix statuses
-  return query select 
+  return query select
     'Known bugs fixed'::text,
-    index_pilot._check_pg_version_bugfixed(),
-    case when index_pilot._check_pg_version_bugfixed() then 'Minor version is safe' else 'Upgrade to latest minor recommended' end;
+    leandex._check_pg_version_bugfixed(),
+    case when leandex._check_pg_version_bugfixed() then 'Minor version is safe' else 'Upgrade to latest minor recommended' end;
 
-  return query select 
+  return query select
     'PG14 bug #17485 fixed'::text,
-    index_pilot._check_pg14_version_bugfixed(),
-    case when index_pilot._check_pg14_version_bugfixed() then 'Not affected' else 'Update to 14.4 or newer' end;
+    leandex._check_pg14_version_bugfixed(),
+    case when leandex._check_pg14_version_bugfixed() then 'Not affected' else 'Update to 14.4 or newer' end;
 
   -- Extensions
-  return query select 
+  return query select
     'Extension: dblink'::text,
     exists (select 1 from pg_extension where extname = 'dblink'),
     'Run: create extension dblink;';
 
-  return query select 
+  return query select
     'Extension: postgres_fdw'::text,
     exists (select 1 from pg_extension where extname = 'postgres_fdw'),
     'Run: create extension postgres_fdw;';
 
   -- Schema presence
-  return query select 
-    'Schema: index_pilot'::text,
-    exists (select 1 from pg_namespace where nspname = 'index_pilot'),
+  return query select
+    'Schema: leandex'::text,
+    exists (select 1 from pg_namespace where nspname = 'leandex'),
     '';
 
   -- Required tables
@@ -170,12 +170,12 @@ begin
       'tables_version'
     ]) as tbl
   loop
-    return query select 
-      format('Table: %I.%I', 'index_pilot', _res.tbl),
+    return query select
+      format('Table: %I.%I', 'leandex', _res.tbl),
       exists (
         select
-        from information_schema.tables 
-        where table_schema = 'index_pilot' and table_name = _res.tbl
+        from information_schema.tables
+        where table_schema = 'leandex' and table_name = _res.tbl
       ),
       '';
   end loop;
@@ -190,63 +190,63 @@ begin
       'check_permissions'
     ]) as func
   loop
-    return query select 
-      format('Function: %I.%I(..)', 'index_pilot', _res.func),
+    return query select
+      format('Function: %I.%I(..)', 'leandex', _res.func),
       exists (
         select
         from pg_proc as p
         join pg_namespace as n on p.pronamespace = n.oid
-        where n.nspname = 'index_pilot' and p.proname = _res.func
+        where n.nspname = 'leandex' and p.proname = _res.func
       ),
       '';
   end loop;
 
   -- Permissions summary
-  select count(*) into _missing_permissions_count 
-  from index_pilot.check_permissions() as p 
+  select count(*) into _missing_permissions_count
+  from leandex.check_permissions() as p
   where p.status = false;
 
-  return query select 
+  return query select
     'Permissions summary'::text,
     (_missing_permissions_count = 0),
     format('Missing: %s', _missing_permissions_count);
 
   -- FDW security status (detailed lines)
-  for _res in select * from index_pilot.check_fdw_security_status() loop
-    return query 
-    select 
+  for _res in select * from leandex.check_fdw_security_status() loop
+    return query
+    select
       format('FDW: %s', _res.component)::text,
       (lower(_res.status) in ('ok','installed','granted','exists','secure','configured')),
       _res.details::text;
   end loop;
 
   -- Control DB architecture checks
-  return query select 
-    'Control DB: table index_pilot.target_databases'::text,
+  return query select
+    'Control DB: table leandex.target_databases'::text,
     exists (
-      select 1 from information_schema.tables where table_schema = 'index_pilot' and table_name = 'target_databases'
+      select 1 from information_schema.tables where table_schema = 'leandex' and table_name = 'target_databases'
     ),
     'Required for multi-database control mode';
 
   if exists (
-    select 1 
+    select 1
     from information_schema.tables
-    where 
-      table_schema = 'index_pilot' 
+    where
+      table_schema = 'leandex'
       and table_name = 'target_databases'
   ) then
-    return query 
-    select 
+    return query
+    select
       'Control DB: registered targets'::text,
-      ((select count(*) from index_pilot.target_databases where enabled) > 0),
-      (select string_agg(database_name, ', ') from index_pilot.target_databases);
+      ((select count(*) from leandex.target_databases where enabled) > 0),
+      (select string_agg(database_name, ', ') from leandex.target_databases);
 
-    return query 
-    select 
+    return query
+    select
       'Safety: current DB not listed as target'::text,
       not exists (
-        select 1 
-        from index_pilot.target_databases 
+        select 1
+        from leandex.target_databases
         where database_name = current_database()
         ),
       'Do not register the control database as a target';
@@ -257,7 +257,7 @@ begin
     perform dblink_connect(
       'env_test',
       coalesce(
-        (select fdw_server_name from index_pilot.target_databases where enabled limit 1),
+        (select fdw_server_name from leandex.target_databases where enabled limit 1),
         null
       )
     );
@@ -267,7 +267,7 @@ begin
     _fdw_self_ok := false;
   end;
 
-  return query select 
+  return query select
     'FDW self-connection test'::text,
     _fdw_self_ok,
     case when _fdw_self_ok then 'Connected via user mapping' else 'Ensure at least one enabled target with valid user mapping' end;
@@ -287,13 +287,13 @@ create extension if not exists dblink;
  * Validate table structure version meets minimum requirements
  * Throws exception if schema is outdated and needs upgrade
  */
-create function index_pilot._check_structure_version() returns void as
+create function leandex._check_structure_version() returns void as
 $body$
 declare
   _tables_version integer;
   _required_version integer := 1;
 begin
-  select version into strict _tables_version from index_pilot.tables_version;
+  select version into strict _tables_version from leandex.tables_version;
 
   if (_tables_version < _required_version) then
     raise exception using
@@ -301,7 +301,7 @@ begin
         'Current tables version %s is less than minimally required %s for %s code version.',
         _tables_version,
         _required_version,
-        index_pilot.version()
+        leandex.version()
       ),
       hint = 'Update tables structure.';
   end if;
@@ -314,17 +314,17 @@ language plpgsql;
  * Automatically upgrade table structure to required version
  * Performs incremental schema migrations using version-specific upgrade functions
  */
-create function index_pilot.check_update_structure_version() returns void as
+create function leandex.check_update_structure_version() returns void as
 $body$
 declare
    _tables_version integer;
    _required_version integer := 1;
 begin
-  select version into strict _tables_version from index_pilot.tables_version;
+  select version into strict _tables_version from leandex.tables_version;
 
   while (_tables_version < _required_version) loop
     execute format(
-      'select index_pilot._structure_version_%s_%s()',
+      'select leandex._structure_version_%s_%s()',
       _tables_version,
       _tables_version + 1
     );
@@ -338,36 +338,36 @@ $body$
 language plpgsql;
 
 
--- FDW and connection management functions have been moved to index_pilot_fdw.sql
+-- FDW and connection management functions have been moved to leandex_fdw.sql
 
 
 /*
  * Get reindexable indexes from remote database
  * Filters for safe indexes: excludes system schemas, BRIN, exclusion constraints
  */
-create function index_pilot._remote_get_indexes_indexrelid(_datname name)
+create function leandex._remote_get_indexes_indexrelid(_datname name)
 returns table(
-  datname name, 
-  schemaname name, 
-  relname name, 
-  indexrelname name, 
+  datname name,
+  schemaname name,
+  relname name,
+  indexrelname name,
   indexrelid oid
 ) as
 $body$
 declare
   _use_toast_tables text;
 begin
-  if index_pilot._check_pg_version_bugfixed() then 
+  if leandex._check_pg_version_bugfixed() then
     _use_toast_tables := 'True';
-  else 
+  else
     _use_toast_tables := 'False';
   end if;
-    
+
   -- Secure FDW connection for querying indexes
-  perform index_pilot._connect_securely(_datname);
-    
+  perform leandex._connect_securely(_datname);
+
   return query select
-    _datname, 
+    _datname,
     _res.schemaname,
     _res.relname,
     _res.indexrelname,
@@ -390,7 +390,7 @@ begin
           -- TOAST indexes info
           left join pg_catalog.pg_class as c1 on c1.reltoastrelid = c.oid and n.nspname = 'pg_toast'
           left join pg_catalog.pg_namespace as n1 on c1.relnamespace = n1.oid
-          where 
+          where
             true
             -- limit reindex for indexes on tables/mviews/TOAST
             -- and c.relkind = any (array['r'::"char", 't'::"char", 'm'::"char"])
@@ -398,17 +398,17 @@ begin
             and ((c.relkind = any (array['r'::"char", 'm'::"char"])) or ((c.relkind = 't'::"char") and %s))
             -- ignore exclusion constraints
             and not exists (select from pg_constraint where pg_constraint.conindid = i.oid and pg_constraint.contype = 'x')
-            -- ignore indexes for system tables and index_pilot own tables
-            and n.nspname not in ('pg_catalog', 'information_schema', 'index_pilot')
-            -- ignore indexes on TOAST tables of system tables and index_pilot own tables
-            and (n1.nspname is null or n1.nspname not in ('pg_catalog', 'information_schema', 'index_pilot'))
+            -- ignore indexes for system tables and leandex own tables
+            and n.nspname not in ('pg_catalog', 'information_schema', 'leandex')
+            -- ignore indexes on TOAST tables of system tables and leandex own tables
+            and (n1.nspname is null or n1.nspname not in ('pg_catalog', 'information_schema', 'leandex'))
             -- skip BRIN indexes... please see BUG #17205 https://www.postgresql.org/message-id/flat/17205-42b1d8f131f0cf97%%40postgresql.org
             and a.amname not in ('brin') and x.indislive
             -- skip indexes on temp relations
             and c.relpersistence <> 't' -- t = temporary table/sequence
             -- debug only
             -- order by 1, 2, 3
-        $sql$, 
+        $sql$,
         _use_toast_tables
       )
     )
@@ -427,7 +427,7 @@ language plpgsql;
  * Convert shell-style wildcard patterns to PostgreSQL regex format
  * Transforms * to .* and ? to . with anchors for exact matching
  */
-create function index_pilot._pattern_convert(
+create function leandex._pattern_convert(
   _var text
 ) returns text as
 $body$
@@ -440,7 +440,7 @@ language sql strict immutable;
  * Get configuration setting value using hierarchical priority lookup
  * Searches: index → table → schema → database → global priority order
  */
-create function index_pilot.get_setting(
+create function leandex.get_setting(
   _datname text,
   _schemaname text,
   _relname text,
@@ -451,61 +451,61 @@ $body$
 declare
   _value text;
 begin
-  perform index_pilot._check_structure_version();
+  perform leandex._check_structure_version();
 
   -- raise notice 'debug: |%|%|%|%|', _datname, _schemaname, _relname, _indexrelname;
 
   select _t.value into _value from (
     -- per index setting
-    select 
+    select
       1 as priority,
-      value from index_pilot.config 
+      value from leandex.config
     where
       _key = config.key
-	    and (_datname operator(pg_catalog.~) index_pilot._pattern_convert(config.datname))
-	    and (_schemaname operator(pg_catalog.~) index_pilot._pattern_convert(config.schemaname))
-	    and (_relname operator(pg_catalog.~) index_pilot._pattern_convert(config.relname))
-	    and (_indexrelname operator(pg_catalog.~) index_pilot._pattern_convert(config.indexrelname))
+	    and (_datname operator(pg_catalog.~) leandex._pattern_convert(config.datname))
+	    and (_schemaname operator(pg_catalog.~) leandex._pattern_convert(config.schemaname))
+	    and (_relname operator(pg_catalog.~) leandex._pattern_convert(config.relname))
+	    and (_indexrelname operator(pg_catalog.~) leandex._pattern_convert(config.indexrelname))
 	    and config.indexrelname is not null
 	    and true
     union all
     -- per table setting
-    select 
+    select
       2 as priority,
-      value from index_pilot.config 
+      value from leandex.config
     where
       _key = config.key
-      and (_datname operator(pg_catalog.~) index_pilot._pattern_convert(config.datname))
-      and (_schemaname operator(pg_catalog.~) index_pilot._pattern_convert(config.schemaname))
-      and (_relname operator(pg_catalog.~) index_pilot._pattern_convert(config.relname))
+      and (_datname operator(pg_catalog.~) leandex._pattern_convert(config.datname))
+      and (_schemaname operator(pg_catalog.~) leandex._pattern_convert(config.schemaname))
+      and (_relname operator(pg_catalog.~) leandex._pattern_convert(config.relname))
       and config.relname is not null
       and config.indexrelname is null
     union all
     -- per schema setting
-    select 
+    select
       3 as priority,
-      value from index_pilot.config 
+      value from leandex.config
     where
       _key = config.key
-      and (_datname operator(pg_catalog.~) index_pilot._pattern_convert(config.datname))
-      and (_schemaname operator(pg_catalog.~) index_pilot._pattern_convert(config.schemaname))
+      and (_datname operator(pg_catalog.~) leandex._pattern_convert(config.datname))
+      and (_schemaname operator(pg_catalog.~) leandex._pattern_convert(config.schemaname))
       and config.schemaname is not null
       and config.relname is null
     union all
     -- per database setting
-    select 
+    select
       4 as priority,
-      value from index_pilot.config 
+      value from leandex.config
     where
       _key = config.key
-      and (_datname      operator(pg_catalog.~) index_pilot._pattern_convert(config.datname))
+      and (_datname      operator(pg_catalog.~) leandex._pattern_convert(config.datname))
       and config.datname is not null
       and config.schemaname is null
     union all
     -- global setting
-    select 
+    select
       5 as priority,
-      value from index_pilot.config 
+      value from leandex.config
     where
       _key = config.key
       and config.datname is null
@@ -513,7 +513,7 @@ begin
     where value is not null
     order by priority
     limit 1;
-  
+
   return _value;
 end;
 $body$
@@ -524,7 +524,7 @@ language plpgsql stable;
  * Set or update configuration setting at appropriate hierarchy level
  * Auto-detects specificity level based on null parameters, handles conflicts
  */
-create function index_pilot.set_or_replace_setting(
+create function leandex.set_or_replace_setting(
   _datname text,
   _schemaname text,
   _relname text,
@@ -535,46 +535,46 @@ create function index_pilot.set_or_replace_setting(
 ) returns void as
 $body$
 begin
-    perform index_pilot._check_structure_version();
+    perform leandex._check_structure_version();
 
     if _datname is null then
-      insert into index_pilot.config (datname, schemaname, relname, indexrelname, key, value, comment)
+      insert into leandex.config (datname, schemaname, relname, indexrelname, key, value, comment)
       values (_datname, _schemaname, _relname, _indexrelname, _key, _value, _comment)
-      on conflict (key) 
-      where datname is null 
-      do update set 
-        value = excluded.value, 
+      on conflict (key)
+      where datname is null
+      do update set
+        value = excluded.value,
         comment = excluded.comment;
     elsif _schemaname is null then
-      insert into index_pilot.config (datname, schemaname, relname, indexrelname, key, value, comment)
+      insert into leandex.config (datname, schemaname, relname, indexrelname, key, value, comment)
       values (_datname, _schemaname, _relname, _indexrelname, _key, _value, _comment)
-      on conflict (key, datname) 
-      where schemaname is null 
-      do update set 
-        value = excluded.value, 
+      on conflict (key, datname)
+      where schemaname is null
+      do update set
+        value = excluded.value,
         comment = excluded.comment;
     elsif _relname is null    then
-      insert into index_pilot.config (datname, schemaname, relname, indexrelname, key, value, comment)
+      insert into leandex.config (datname, schemaname, relname, indexrelname, key, value, comment)
       values (_datname, _schemaname, _relname, _indexrelname, _key, _value, _comment)
       on conflict (key, datname, schemaname)
-      where relname is null 
-      do update set 
-        value = excluded.value, 
+      where relname is null
+      do update set
+        value = excluded.value,
         comment = excluded.comment;
     elsif _indexrelname is null then
-      insert into index_pilot.config (datname, schemaname, relname, indexrelname, key, value, comment)
+      insert into leandex.config (datname, schemaname, relname, indexrelname, key, value, comment)
       values (_datname, _schemaname, _relname, _indexrelname, _key, _value, _comment)
-      on conflict (key, datname, schemaname, relname) 
-      where indexrelname is null 
-      do update set 
-        value = excluded.value, 
+      on conflict (key, datname, schemaname, relname)
+      where indexrelname is null
+      do update set
+        value = excluded.value,
         comment = excluded.comment;
     else
-      insert into index_pilot.config (datname, schemaname, relname, indexrelname, key, value, comment)
+      insert into leandex.config (datname, schemaname, relname, indexrelname, key, value, comment)
       values (_datname, _schemaname, _relname, _indexrelname, _key, _value, _comment)
-      on conflict (key, datname, schemaname, relname, indexrelname) 
-      do update set 
-        value = excluded.value, 
+      on conflict (key, datname, schemaname, relname, indexrelname)
+      do update set
+        value = excluded.value,
         comment = excluded.comment;
     end if;
     return;
@@ -587,7 +587,7 @@ language plpgsql;
  * Get detailed index information from remote database with filtering
  * Returns comprehensive metrics, clamps zero tuples, supports wildcard filtering
  */
-create function index_pilot._remote_get_indexes_info(
+create function leandex._remote_get_indexes_info(
   _datname name,
   _schemaname name,
   _relname name,
@@ -607,14 +607,14 @@ $body$
 declare
   _use_toast_tables text;
 begin
-  if index_pilot._check_pg_version_bugfixed() then 
+  if leandex._check_pg_version_bugfixed() then
     _use_toast_tables := 'True';
-  else 
+  else
     _use_toast_tables := 'False';
   end if;
-    
+
   -- Secure FDW connection for querying index info
-  perform index_pilot._connect_securely(_datname);
+  perform leandex._connect_securely(_datname);
 
   return query select
     d.oid as datid,
@@ -661,10 +661,10 @@ begin
           and ((c.relkind = any (array['r'::"char", 'm'::"char"])) or ((c.relkind = 't'::"char") and %s))
           -- ignore exclusion constraints
           and not exists (select from pg_constraint where pg_constraint.conindid = i.oid and pg_constraint.contype = 'x')
-          -- ignore indexes for system tables and index_pilot own tables
-          and n.nspname not in ('pg_catalog', 'information_schema', 'index_pilot')
-          -- ignore indexes on TOAST tables of system tables and index_pilot own tables
-          and (n1.nspname is null or n1.nspname not in ('pg_catalog', 'information_schema', 'index_pilot'))
+          -- ignore indexes for system tables and leandex own tables
+          and n.nspname not in ('pg_catalog', 'information_schema', 'leandex')
+          -- ignore indexes on TOAST tables of system tables and leandex own tables
+          and (n1.nspname is null or n1.nspname not in ('pg_catalog', 'information_schema', 'leandex'))
           -- skip BRIN indexes... please see BUG #17205 https://www.postgresql.org/message-id/flat/17205-42b1d8f131f0cf97%%40postgresql.org
           and a.amname not in ('brin') and x.indislive
           -- skip indexes on temp relations
@@ -699,7 +699,7 @@ language plpgsql;
  * Record and maintain index information in the tracking table
  * Updates metadata, manages bloat ratios, cleans removed indexes, supports filtering
  */
-create function index_pilot._record_indexes_info(
+create function leandex._record_indexes_info(
   _datname name,
   _schemaname name,
   _relname name,
@@ -713,19 +713,19 @@ declare
 begin
   -- Establish dblink connection for managed services mode with cleanup guarantee
   if dblink_get_connections() is null or not (_datname = any(dblink_get_connections())) then
-    perform index_pilot._dblink_connect_if_not(_datname);
+    perform leandex._dblink_connect_if_not(_datname);
     _connection_created := true;
   end if;
-  
+
   -- merge index data fetched from the database and index_latest_state
   -- now keep info about all potentially interesting indexes (even small ones)
   -- we can do it now because we keep exactly one entry in index_latest_state per index (without history)
   with _actual_indexes as (
     select datid, indexrelid, datname, schemaname, relname, indexrelname, indisvalid, indexsize, estimated_tuples
-    from index_pilot._remote_get_indexes_info(_datname, _schemaname, _relname, _indexrelname)
+    from leandex._remote_get_indexes_info(_datname, _schemaname, _relname, _indexrelname)
   ),
   _old_indexes as (
-    delete from index_pilot.index_latest_state as i
+    delete from leandex.index_latest_state as i
     where not exists (
       select from _actual_indexes
       where
@@ -737,21 +737,21 @@ begin
     and (_relname is null or i.relname = _relname)
     and (_indexrelname is null or i.indexrelname = _indexrelname)
   )
-  -- todo: do something with ugly code duplication in index_pilot._reindex_index and index_pilot._record_indexes_info
-  insert into index_pilot.index_latest_state as i
+  -- todo: do something with ugly code duplication in leandex._reindex_index and leandex._record_indexes_info
+  insert into leandex.index_latest_state as i
   (datid, datname, schemaname, relname, indexrelid, indexrelname, indexsize, indisvalid, estimated_tuples, best_ratio)
-  select 
-    datid, 
-    datname, 
-    schemaname, 
-    relname, 
-    indexrelid, 
-    indexrelname, 
+  select
+    datid,
+    datname,
+    schemaname,
+    relname,
+    indexrelid,
+    indexrelname,
     indexsize,
-    indisvalid, 
+    indisvalid,
     estimated_tuples,
     case
-      when (indexsize > pg_size_bytes(index_pilot.get_setting(datname, schemaname, relname, indexrelname, 'minimum_reliable_index_size'))) then
+      when (indexsize > pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'minimum_reliable_index_size'))) then
         -- initialize baseline from the current ratio on first sighting (insert),
         -- including after REINDEX/OID change; _force_populate is not needed on insert
         indexsize::real / estimated_tuples::real
@@ -774,10 +774,10 @@ begin
     best_ratio =
       case
         -- _force_populate=true set (or write) best ratio to current ratio (except the case when index too small to be reliably estimated)
-        when (_force_populate and excluded.indexsize > pg_size_bytes(index_pilot.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+        when (_force_populate and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
           then excluded.indexsize::real / excluded.estimated_tuples::real
         -- if index is too small, keep previous
-        when (excluded.indexsize < pg_size_bytes(index_pilot.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+        when (excluded.indexsize < pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
           then i.best_ratio
         -- fill only if missing
         when (i.best_ratio is null)
@@ -788,7 +788,7 @@ begin
 
   -- tell about not valid indexes
   for index_info in
-    select indexrelname, relname, schemaname, datname from index_pilot.index_latest_state
+    select indexrelname, relname, schemaname, datname from leandex.index_latest_state
       where not indisvalid
       and datname = _datname
       and (_schemaname is null or schemaname = _schemaname)
@@ -801,7 +801,7 @@ begin
 
 exception when others then
   -- Guaranteed connection cleanup on any exception
-  if _connection_created and dblink_get_connections() is not null 
+  if _connection_created and dblink_get_connections() is not null
      and _datname = any(dblink_get_connections()) then
     perform dblink_disconnect(_datname);
   end if;
@@ -815,18 +815,18 @@ language plpgsql;
  * Clean up old and stale records from tracking tables
  * Removes old history records and stale database state records based on retention settings
  */
-create function index_pilot._cleanup_old_records() returns void as
+create function leandex._cleanup_old_records() returns void as
 $body$
 begin
   -- TODO replace with fast distinct implementation
   with rels as materialized (
     select distinct datname, schemaname, relname, indexrelname
-    from index_pilot.reindex_history
+    from leandex.reindex_history
   ), age_limit as materialized (
-    select *, now() - index_pilot.get_setting(datname, schemaname, relname, indexrelname, 'reindex_history_retention_period')::interval as max_age
+    select *, now() - leandex.get_setting(datname, schemaname, relname, indexrelname, 'reindex_history_retention_period')::interval as max_age
     from rels
   )
-  delete from index_pilot.reindex_history
+  delete from leandex.reindex_history
   using age_limit
   where
     reindex_history.datname = age_limit.datname
@@ -834,15 +834,15 @@ begin
     and reindex_history.relname = age_limit.relname
     and reindex_history.indexrelname = age_limit.indexrelname
     and reindex_history.entry_timestamp < age_limit.max_age;
-    
+
   -- clean index_latest_state for not existing databases
-  delete from index_pilot.index_latest_state
+  delete from leandex.index_latest_state
   where datid not in (
     select oid from pg_database
     where
       not datistemplate
       and datallowconn
-      and index_pilot.get_setting(datname, null, null, null, 'skip')::boolean is distinct from true
+      and leandex.get_setting(datname, null, null, null, 'skip')::boolean is distinct from true
   );
 
   return;
@@ -855,33 +855,33 @@ language plpgsql;
  * Calculate and return bloat estimates for all indexes in a database
  * Compares current size ratios with historical best, ordered by bloat level
  */
-create function index_pilot.get_index_bloat_estimates(
+create function leandex.get_index_bloat_estimates(
   _datname name
 ) returns table(
-  datname name, 
-  schemaname name, 
-  relname name, 
-  indexrelname name, 
-  indexsize bigint, 
+  datname name,
+  schemaname name,
+  relname name,
+  indexrelname name,
+  indexsize bigint,
   estimated_bloat real
 ) as
 $body$
 declare
   _datid oid;
 begin
-  perform index_pilot._check_structure_version();
+  perform leandex._check_structure_version();
 
   select oid from pg_database as d where d.datname = _datname into _datid;
 
   -- calculate estimated bloat by comparing the current size-to-tuple ratio with the best observed ratio
-  return query select 
-    _datname, 
-    i.schemaname, 
-    i.relname, 
-    i.indexrelname, 
+  return query select
+    _datname,
+    i.schemaname,
+    i.relname,
+    i.indexrelname,
     i.indexsize,
     (i.indexsize::real / (i.best_ratio * estimated_tuples::real)) as estimated_bloat
-  from index_pilot.index_latest_state as i
+  from leandex.index_latest_state as i
   where
     i.datid = _datid
     -- and indisvalid is true
@@ -898,7 +898,7 @@ language plpgsql strict;
  * Perform concurrent reindexing of a specific index
  * Executes REINDEX INDEX CONCURRENTLY via secure dblink with logging and error handling
  */
-create function index_pilot._reindex_index(
+create function leandex._reindex_index(
   _datname name,
   _schemaname name,
   _relname name,
@@ -920,7 +920,7 @@ begin
   -- The connection name is set to the database name (note: not unique per index).
   if dblink_get_connections() is null or not (_datname = any(dblink_get_connections())) then
     -- Establish a secure connection to the target database, handling control database mode if needed
-    perform index_pilot._connect_securely(_datname);
+    perform leandex._connect_securely(_datname);
 
     raise notice 'Created dblink connection: %', _datname;
   end if;
@@ -929,7 +929,7 @@ begin
 
   -- Retrieve the current index size and confirm the index exists in the target database
   select indexsize, estimated_tuples into _indexsize_before, _estimated_tuples
-  from index_pilot._remote_get_indexes_info(_datname, _schemaname, _relname, _indexrelname)
+  from leandex._remote_get_indexes_info(_datname, _schemaname, _relname, _indexrelname)
   where indisvalid;
 
   -- If the index doesn't exist anymore, exit the function
@@ -939,7 +939,7 @@ begin
 
   -- Perform the reindex operation using synchronous dblink
   _timestamp := pg_catalog.clock_timestamp ();
-  
+
   -- Execute REINDEX INDEX CONCURRENTLY in a synchronous manner (similar to the original pg_index_watch)
   -- This operation blocks until the reindexing process is fully completed
   begin
@@ -954,49 +954,49 @@ begin
     -- Continue anyway, the index might have issues
     -- This allows the function to complete successfully even if the reindex fails
   end;
-  
+
   -- Don't disconnect - keep connection for reuse (like original pg_index_watch)
 
   _reindex_duration := pg_catalog.clock_timestamp() - _timestamp;
 
   -- Retrieve the index size after reindexing
   select indexsize into _indexsize_after
-  from index_pilot._remote_get_indexes_info(_datname, _schemaname, _relname, _indexrelname)
+  from leandex._remote_get_indexes_info(_datname, _schemaname, _relname, _indexrelname)
   where indisvalid;
-  
+
   -- If the index doesn't exist anymore or is invalid, use the original size
   if _indexsize_after is null then
     _indexsize_after := _indexsize_before;
   end if;
 
   -- Log the completed reindex operation to the reindex_history table
-  insert into index_pilot.reindex_history (
-    datname, 
+  insert into leandex.reindex_history (
+    datname,
     schemaname,
     relname,
     indexrelname,
     indexsize_before,
-    indexsize_after, 
-    estimated_tuples, 
-    reindex_duration, 
+    indexsize_after,
+    estimated_tuples,
+    reindex_duration,
     analyze_duration,
     entry_timestamp
   ) values (
-    _datname, 
-    _schemaname, 
-    _relname, 
+    _datname,
+    _schemaname,
+    _relname,
     _indexrelname,
     _indexsize_before,
-    _indexsize_after, 
-    _estimated_tuples, 
-    _reindex_duration, 
+    _indexsize_after,
+    _estimated_tuples,
+    _reindex_duration,
     '0'::interval,
     now()
   );
-  
-  raise notice 'reindex COMPLETED: %.% - size before: %, size after: %, duration: %', 
-    _schemaname, _indexrelname, 
-    pg_size_pretty(_indexsize_before), 
+
+  raise notice 'reindex COMPLETED: %.% - size before: %, size after: %, duration: %',
+    _schemaname, _indexrelname,
+    pg_size_pretty(_indexsize_before),
     pg_size_pretty(_indexsize_after),
     _reindex_duration;
 end;
@@ -1008,7 +1008,7 @@ language plpgsql strict;
  * Main reindexing orchestrator procedure
  * Identifies and reindexes bloated indexes based on thresholds and estimates
  */
-create procedure index_pilot.do_reindex(
+create procedure leandex.do_reindex(
   _datname name,
   _schemaname name,
   _relname name,
@@ -1020,7 +1020,7 @@ declare
   _index record;
   _connection_created boolean := false;
 begin
-  perform index_pilot._check_structure_version();
+  perform leandex._check_structure_version();
 
   -- IMPORTANT: Do not run in the current database to prevent deadlocks
   if _datname = current_database() then
@@ -1034,7 +1034,7 @@ begin
 
   -- Ensure dblink connection is established before starting any transaction with cleanup guarantee
   if dblink_get_connections() is null or not (_datname = any(dblink_get_connections())) then
-    perform index_pilot._dblink_connect_if_not(_datname);
+    perform leandex._dblink_connect_if_not(_datname);
     _connection_created := true;
     commit; -- Commit after connection to minimize risk of locking issues
   end if;
@@ -1044,7 +1044,7 @@ begin
     -- The force option causes index_rebuild_scale_factor to be ignored, reindexing all eligible indexes
     -- Indexes that are too small (below index_size_threshold) or explicitly set to skip in the config are always ignored, even with force enabled
     -- todo: consider revisiting this logic in the future
-    from index_pilot.get_index_bloat_estimates(_datname)
+    from leandex.get_index_bloat_estimates(_datname)
     where
       (_schemaname is null or schemaname = _schemaname)
       and (_relname is null or relname = _relname)
@@ -1052,19 +1052,19 @@ begin
       and (_force or
         (
           -- ignore indexes that are too small to be relevant
-          indexsize >= pg_size_bytes(index_pilot.get_setting(datname, schemaname, relname, indexrelname, 'index_size_threshold'))
+          indexsize >= pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_size_threshold'))
           -- ignore indexes explicitly marked to be skipped
-          and index_pilot.get_setting(datname, schemaname, relname, indexrelname, 'skip')::boolean is distinct from true
+          and leandex.get_setting(datname, schemaname, relname, indexrelname, 'skip')::boolean is distinct from true
           -- placeholder for future configurability using get_setting
           and (
             estimated_bloat is null
-            or estimated_bloat >= index_pilot.get_setting(datname, schemaname, relname, indexrelname, 'index_rebuild_scale_factor')::float
+            or estimated_bloat >= leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_rebuild_scale_factor')::float
           )
         )
       )
     loop
       -- Record what we're working on
-      insert into index_pilot.current_processed_index(
+      insert into leandex.current_processed_index(
         datname,
           schemaname,
           relname,
@@ -1079,27 +1079,27 @@ begin
 
       -- Record the start of the reindex operation with status 'in_progress'
       -- Use cached information from index_latest_state rather than querying the remote database
-      insert into index_pilot.reindex_history (
+      insert into leandex.reindex_history (
         datname, schemaname, relname, indexrelname,
-        indexsize_before, indexsize_after, estimated_tuples, 
+        indexsize_before, indexsize_after, estimated_tuples,
         reindex_duration, analyze_duration, entry_timestamp, status
-      ) 
-      select 
-        datname, 
-        schemaname, 
-        relname, 
+      )
+      select
+        datname,
+        schemaname,
+        relname,
         indexrelname,
-        indexsize, 
-        null, 
+        indexsize,
+        null,
         estimated_tuples,  -- null until completion
-        null, 
-        null, 
-        now(), 
+        null,
+        null,
+        now(),
         'in_progress'
       from (
         select distinct on (datid, indexrelid)
           datname, schemaname, relname, indexrelname, indexsize, estimated_tuples
-        from index_pilot.index_latest_state
+        from leandex.index_latest_state
         where datname = _index.datname
           and schemaname = _index.schemaname
           and relname = _index.relname
@@ -1107,10 +1107,10 @@ begin
           and indisvalid
         order by datid, indexrelid, mtime desc
       ) latest;
-      
+
       -- Commit to release all locks before starting synchronous reindex
       commit;
-      
+
       -- Perform REINDEX synchronously for robust and predictable operation
       -- Synchronous execution enables immediate status updates and simplifies process management
       begin
@@ -1119,19 +1119,19 @@ begin
           _index.datname,
           format('reindex index concurrently %I.%I', _index.schemaname, _index.indexrelname)
         );
-           
+
         raise notice 'REINDEX INDEX CONCURRENTLY completed for %.%', _index.schemaname, _index.indexrelname;
-           
+
         -- Retrieve the index size after reindexing is complete
         declare
           _final_size bigint;
         begin
           select indexsize into _final_size
-          from index_pilot._remote_get_indexes_info(_index.datname, _index.schemaname, _index.relname, _index.indexrelname)
+          from leandex._remote_get_indexes_info(_index.datname, _index.schemaname, _index.relname, _index.indexrelname)
           where indisvalid;
 
           -- Update reindex_history with completion timestamp, status, and final index size
-          update index_pilot.reindex_history
+          update leandex.reindex_history
           set
             reindex_duration = clock_timestamp() - entry_timestamp,
             status = 'completed',
@@ -1143,12 +1143,12 @@ begin
             and indexrelname = _index.indexrelname
             and status = 'in_progress';
         end;
-             
+
       exception when others then
         raise warning 'REINDEX failed for %.%: %', _index.schemaname, _index.indexrelname, sqlerrm;
-           
+
         -- Record failure in reindex_history with error details
-        update index_pilot.reindex_history
+        update leandex.reindex_history
         set
           status = 'failed',
           error_message = sqlerrm,
@@ -1160,15 +1160,15 @@ begin
           and indexrelname = _index.indexrelname
           and status = 'in_progress';
       end;
-       
+
       -- Clean up tracking record after successful reindex
-      delete from index_pilot.current_processed_index
+      delete from leandex.current_processed_index
       where
-        datname = _index.datname 
-        and schemaname = _index.schemaname 
-        and relname = _index.relname 
+        datname = _index.datname
+        and schemaname = _index.schemaname
+        and relname = _index.relname
         and indexrelname = _index.indexrelname;
-      
+
       -- Commit the cleanup
       commit;
 
@@ -1179,7 +1179,7 @@ begin
 -- It prevents commits from working and needs to be done differently
 -- exception when others then
 --   -- Guaranteed connection cleanup on any exception
---   if _connection_created and dblink_get_connections() is not null 
+--   if _connection_created and dblink_get_connections() is not null
 --      and _datname = any(dblink_get_connections()) then
 --     perform dblink_disconnect(_datname);
 --   end if;
@@ -1193,7 +1193,7 @@ language plpgsql;
  * Force-populate index statistics and bloat baselines without reindexing
  * Records current size-to-tuple ratios as optimal baselines, supports filtering
  */
-create function index_pilot.do_force_populate_index_stats(
+create function leandex.do_force_populate_index_stats(
   _datname name,
   _schemaname name,
   _relname name,
@@ -1204,21 +1204,21 @@ declare
   _connection_created boolean := false;
 begin
   -- Ensure table structure is at required version
-  perform index_pilot._check_structure_version();
+  perform leandex._check_structure_version();
 
   -- Ensure dblink connection is established before starting any transaction with cleanup guarantee
   if dblink_get_connections() is null or not (_datname = any(dblink_get_connections())) then
-    perform index_pilot._dblink_connect_if_not(_datname);
+    perform leandex._dblink_connect_if_not(_datname);
     _connection_created := true;
   end if;
 
   -- Force-populate best_ratio from current state without reindexing
-  perform index_pilot._record_indexes_info(_datname, _schemaname, _relname, _indexrelname, _force_populate=>true);
+  perform leandex._record_indexes_info(_datname, _schemaname, _relname, _indexrelname, _force_populate=>true);
   return;
 
 exception when others then
   -- Guaranteed connection cleanup on any exception
-  if _connection_created and dblink_get_connections() is not null 
+  if _connection_created and dblink_get_connections() is not null
      and _datname = any(dblink_get_connections()) then
     perform dblink_disconnect(_datname);
   end if;
@@ -1232,21 +1232,21 @@ language plpgsql;
  * Acquire advisory lock to prevent concurrent periodic executions
  * Prevents resource conflicts and duplicate processing, returns lock ID or raises exception
  */
-create function index_pilot._check_lock() returns bigint as
+create function leandex._check_lock() returns bigint as
 $body$
 declare
   _id bigint;
   _is_not_running boolean;
 begin
-  -- Get the lock id for the index_pilot namespace
-  select oid from pg_namespace where nspname = 'index_pilot' into _id;
+  -- Get the lock id for the leandex namespace
+  select oid from pg_namespace where nspname = 'leandex' into _id;
 
   -- Check if the lock is already held by another instance
   select pg_try_advisory_lock(_id) into _is_not_running;
 
   -- If the lock is already held by another instance, raise an error
   if not _is_not_running then
-    raise 'Previous launch of index_pilot.periodic is still running.';
+    raise 'Previous launch of leandex.periodic is still running.';
   end if;
 
   return _id;
@@ -1259,20 +1259,20 @@ language plpgsql;
  * Clean up orphaned invalid indexes from failed REINDEX INDEX CONCURRENTLY operations
  * Drops leftover "_ccnew" indexes and cleans tracking records to prevent storage waste
  */
-create procedure index_pilot._cleanup_our_not_valid_indexes() as
+create procedure leandex._cleanup_our_not_valid_indexes() as
 $body$
 declare
   _index record;
 begin
   for _index in
     select datname, schemaname, relname, indexrelname
-    from index_pilot.current_processed_index
+    from leandex.current_processed_index
   loop
     -- Ensure we have a connection to the target database
     if dblink_get_connections() is null or not (_index.datname = any(dblink_get_connections())) then
-      perform index_pilot._connect_securely(_index.datname);
+      perform leandex._connect_securely(_index.datname);
     end if;
-    
+
     -- Check if the invalid _ccnew index exists
     if exists (
       select from dblink(_index.datname,
@@ -1289,8 +1289,8 @@ begin
               and i.relname = '%3$s_ccnew'
               and not x.indisvalid
           $sql$,
-          _index.schemaname, 
-          _index.relname, 
+          _index.schemaname,
+          _index.relname,
           _index.indexrelname
         )
       ) as _res(indexrelid oid))
@@ -1309,9 +1309,9 @@ begin
                 n.nspname = '%1$s'
                 and c.relname = '%2$s'
                 and i.relname = '%3$s'
-            $sql$, 
-            _index.schemaname, 
-            _index.relname, 
+            $sql$,
+            _index.schemaname,
+            _index.relname,
             _index.indexrelname
           )
         ) as _res(indexrelid oid))
@@ -1331,7 +1331,7 @@ begin
     end if;
 
     -- Clean up the current_processed_index record
-    delete from index_pilot.current_processed_index
+    delete from leandex.current_processed_index
     where
       datname = _index.datname and
       schemaname = _index.schemaname and
@@ -1347,7 +1347,7 @@ language plpgsql;
  * Main periodic execution procedure for automated index maintenance
  * Primary entry point for scheduled operations: validates, migrates, processes databases
  */
-create or replace procedure index_pilot.periodic(
+create or replace procedure leandex.periodic(
   real_run boolean default false,
   force boolean default false
 ) as
@@ -1360,44 +1360,44 @@ declare
   _id bigint;
 begin
   -- Validate PostgreSQL version safety
-  perform index_pilot._validate_pg_version();
+  perform leandex._validate_pg_version();
 
   -- Acquire advisory lock to prevent concurrent executions
-  select index_pilot._check_lock() into _id;
+  select leandex._check_lock() into _id;
 
   -- Check if the table structure is up to date
-  perform index_pilot.check_update_structure_version();
+  perform leandex.check_update_structure_version();
 
   -- Check if we're in control database mode
-  if exists (select from pg_tables where schemaname = 'index_pilot' and tablename = 'target_databases') then
+  if exists (select from pg_tables where schemaname = 'leandex' and tablename = 'target_databases') then
     -- Control database mode: process all enabled target databases
-    for _datname in 
+    for _datname in
       select database_name
-      from index_pilot.target_databases
+      from leandex.target_databases
       where enabled
     loop
       -- Clean old history for this database
-      delete from index_pilot.reindex_history
+      delete from leandex.reindex_history
       where datname = _datname
         and entry_timestamp < now() - coalesce(
-          index_pilot.get_setting(datname, schemaname, relname, indexrelname, 'reindex_history_retention_period')::interval,
+          leandex.get_setting(datname, schemaname, relname, indexrelname, 'reindex_history_retention_period')::interval,
           '10 years'::interval
         );
-          
+
       -- Record indexes for this database
-      perform index_pilot._record_indexes_info(_datname, null, null, null);
-          
+      perform leandex._record_indexes_info(_datname, null, null, null);
+
       if real_run then
-        call index_pilot.do_reindex(_datname, null, null, null, force);
+        call leandex.do_reindex(_datname, null, null, null, force);
         -- refresh snapshot right after reindex to clamp baseline with current ratio
-        perform index_pilot._record_indexes_info(_datname, null, null, null);
+        perform leandex._record_indexes_info(_datname, null, null, null);
       end if;
     end loop;
-        
+
     -- Note: No need to update completed reindexes - all tracking is synchronous now
-        
+
     -- Clean up any invalid _ccnew indexes from failed reindexes
-    call index_pilot._cleanup_our_not_valid_indexes();
+    call leandex._cleanup_our_not_valid_indexes();
   else
     -- Standalone mode (shouldn't happen with our fixes, but keep for safety)
     raise exception 'Control database architecture required. Cannot run periodic in standalone mode.';
@@ -1417,42 +1417,42 @@ language plpgsql;
  * Comprehensive permission and setup validation for leandex
  * Validates required permissions, extensions, and FDW configuration for managed services
  */
-create function index_pilot.check_permissions() returns table(
-  permission text, 
+create function leandex.check_permissions() returns table(
+  permission text,
   status boolean
 ) as
 $body$
 begin
-  return query select 
-    'Can create indexes'::text, 
+  return query select
+    'Can create indexes'::text,
     has_database_privilege(current_database(), 'create');
 
-  return query select 
+  return query select
     'Can read pg_stat_user_indexes'::text,
     has_table_privilege('pg_stat_user_indexes', 'select');
 
-  return query select 
+  return query select
     'Has dblink extension'::text,
     exists (select from pg_extension where extname = 'dblink');
 
-  return query select 
+  return query select
     'Has postgres_fdw extension'::text,
     exists (select from pg_extension where extname = 'postgres_fdw');
 
-  return query select 
+  return query select
     'Has target servers registered'::text,
-    exists (select 1 from index_pilot.target_databases);
+    exists (select 1 from leandex.target_databases);
 
-  return query select 
+  return query select
     'Has user mapping for dblink'::text,
     exists (
       select 1 from pg_user_mappings as um
       where um.usename = current_user
-        and um.srvname in (select fdw_server_name from index_pilot.target_databases where enabled)
+        and um.srvname in (select fdw_server_name from leandex.target_databases where enabled)
     );
 
   -- Verify reindex capability by checking ownership of at least one index
-  return query select 
+  return query select
     'Can reindex (owns indexes)'::text,
     exists (
       select from pg_index as i
@@ -1482,7 +1482,7 @@ begin
   raise notice '';
   raise notice 'Checking permissions...';
 
-  for _perm in select * from index_pilot.check_permissions() loop
+  for _perm in select * from leandex.check_permissions() loop
     raise notice '  %: %',
       rpad(_perm.permission, 30),
       case when _perm.status then 'OK' else 'MISSING' end;
@@ -1500,7 +1500,7 @@ begin
   end if;
 
   raise notice '';
-  raise notice 'Usage: call index_pilot.periodic(true);  -- true = perform actual reindexing';
+  raise notice 'Usage: call leandex.periodic(true);  -- true = perform actual reindexing';
 end $$;
 
 commit;

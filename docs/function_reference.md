@@ -11,22 +11,22 @@
 
 ### Core Functions
 
-#### `index_pilot.do_reindex()`
+#### `leandex.do_reindex()`
 Manually triggers reindexing for specific objects.
 ```sql
-procedure index_pilot.do_reindex(
-    _datname name, 
-    _schemaname name, 
-    _relname name, 
-    _indexrelname name, 
+procedure leandex.do_reindex(
+    _datname name,
+    _schemaname name,
+    _relname name,
+    _indexrelname name,
     _force boolean default false  -- Force reindex regardless of bloat
 )
 ```
 
-#### `index_pilot.periodic()`
+#### `leandex.periodic()`
 Main procedure for automated bloat detection and reindexing.
 ```sql
-procedure index_pilot.periodic(
+procedure leandex.periodic(
     real_run boolean default false,  -- Execute actual reindexing
     force boolean default false      -- Force all eligible indexes
 )
@@ -34,42 +34,42 @@ procedure index_pilot.periodic(
 
 ### Bloat Analysis
 
-#### `index_pilot.get_index_bloat_estimates()`
+#### `leandex.get_index_bloat_estimates()`
 Returns current bloat estimates for all indexes in a database.
 ```sql
-function index_pilot.get_index_bloat_estimates(_datname name) 
+function leandex.get_index_bloat_estimates(_datname name)
 returns table(
-    datname name, 
-    schemaname name, 
-    relname name, 
-    indexrelname name, 
-    indexsize bigint, 
+    datname name,
+    schemaname name,
+    relname name,
+    indexrelname name,
+    indexsize bigint,
     estimated_bloat real
 )
 ```
 
 Notes:
-- `estimated_bloat` is computed as `indexsize / (best_ratio * estimated_tuples)` using cached state in `index_pilot.index_latest_state`.
+- `estimated_bloat` is computed as `indexsize / (best_ratio * estimated_tuples)` using cached state in `leandex.index_latest_state`.
 - Immediately after baseline initialization (see `do_force_populate_index_stats`) `estimated_bloat` will be ~1.0 by definition; it grows as indexes bloat further.
 
 ### Non-Superuser Mode Functions
 
-#### `index_pilot.check_permissions()`
+#### `leandex.check_permissions()`
 Verifies permissions for non-superuser mode operation.
 ```sql
-function index_pilot.check_permissions() 
+function leandex.check_permissions()
 returns table(
-    permission text, 
+    permission text,
     status boolean
 )
 ```
 
 ### Configuration
 
-#### `index_pilot.get_setting()`
+#### `leandex.get_setting()`
 Reads effective setting with precedence (index → table → schema → db → global).
 ```sql
-function index_pilot.get_setting(
+function leandex.get_setting(
   _datname text,
   _schemaname text,
   _relname text,
@@ -78,10 +78,10 @@ function index_pilot.get_setting(
 ) returns text
 ```
 
-#### `index_pilot.set_or_replace_setting()`
+#### `leandex.set_or_replace_setting()`
 Sets/overrides a setting at a specific scope.
 ```sql
-function index_pilot.set_or_replace_setting(
+function leandex.set_or_replace_setting(
   _datname text,
   _schemaname text,
   _relname text,
@@ -94,28 +94,28 @@ function index_pilot.set_or_replace_setting(
 
 ### FDW and connection setup
 
-#### `index_pilot._connect_securely()`
+#### `leandex._connect_securely()`
 Internal helper that opens a dblink connection to a registered target database using the target's `postgres_fdw` server and current-user mapping.
 
 ```sql
-function index_pilot._connect_securely(_datname name) returns void
+function leandex._connect_securely(_datname name) returns void
 ```
 
-Normal users should prefer `./leandex register-target`, which creates the foreign server, user mapping, and `index_pilot.target_databases` entry.
+Normal users should prefer `./leandex register-target`, which creates the foreign server, user mapping, and `leandex.target_databases` entry.
 
-#### `index_pilot.check_fdw_security_status()`
+#### `leandex.check_fdw_security_status()`
 Checks FDW-related setup status.
 ```sql
-function index_pilot.check_fdw_security_status()
+function leandex.check_fdw_security_status()
 returns table(component text, status text, details text)
 ```
 
 ### Maintenance helpers and meta
 
-#### `index_pilot.do_force_populate_index_stats()`
+#### `leandex.do_force_populate_index_stats()`
 Initializes baseline using current sizes/tuples without reindex.
 ```sql
-function index_pilot.do_force_populate_index_stats(
+function leandex.do_force_populate_index_stats(
   _datname name,
   _schemaname name,
   _relname name,
@@ -125,20 +125,20 @@ function index_pilot.do_force_populate_index_stats(
 Examples:
 ```sql
 -- Initialize baseline for a target DB
-select index_pilot.do_force_populate_index_stats('your_database', null, null, null);
+select leandex.do_force_populate_index_stats('your_database', null, null, null);
 
 -- Initialize baseline for one schema
-select index_pilot.do_force_populate_index_stats('your_database', 'bot', null, null);
+select leandex.do_force_populate_index_stats('your_database', 'bot', null, null);
 ```
 
 When to use:
 - After initial registration, to establish best_ratio without reindexing.
 - After major data reshaping, to reset baseline for specific schemas/tables.
 
-#### `index_pilot.check_environment()`
+#### `leandex.check_environment()`
 Aggregated environment and installation self-check (PostgreSQL version, extensions, schema/tables, core routines presence).
 ```sql
-function index_pilot.check_environment()
+function leandex.check_environment()
 returns table(
   component text,
   is_ok boolean,
@@ -146,15 +146,15 @@ returns table(
 )
 ```
 
-#### `index_pilot.check_update_structure_version()`
+#### `leandex.check_update_structure_version()`
 Migrates internal tables to the required version if needed.
 ```sql
-function index_pilot.check_update_structure_version() returns void
+function leandex.check_update_structure_version() returns void
 ```
 
-#### `index_pilot.version()`
+#### `leandex.version()`
 Returns current code version.
 ```sql
-function index_pilot.version() returns text
+function leandex.version() returns text
 ```
 

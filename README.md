@@ -4,7 +4,7 @@ Keep Postgres indexes lean: detect bloat, rebuild safely, and keep a durable his
 
 `leandex` is an early-stage, DBA-first tool for autonomous reindexing. The production target is deliberately narrow: **safe automatic reindexing** using `reindex index concurrently`, with the control plane stored inside Postgres.
 
-The internal SQL schema is still `index_pilot` for compatibility with the original PostgresAI component. Public project name: `leandex`.
+The SQL schema is `leandex`; this extraction intentionally does a full rename while the project is still pre-adoption.
 
 ## Status
 
@@ -37,12 +37,12 @@ Postgres index bloat is boring until it burns IO, cache, replication lag, and ma
 | Area | Current approach |
 | --- | --- |
 | Rebuild method | `reindex index concurrently` only |
-| Control plane | separate `index_pilot_control` database |
+| Control plane | separate `leandex_control` database |
 | Target DB footprint | no schema installed in target DBs |
 | Credentials | `postgres_fdw` user mappings; avoid plaintext dblink strings |
 | Scope | reindexing only |
 | Locking | avoids same-database reindex orchestration to reduce deadlock risk |
-| History | every reindex attempt is recorded in `index_pilot.reindex_history` |
+| History | every reindex attempt is recorded in `leandex.reindex_history` |
 | Compatibility | Postgres 13+; known unsafe minor releases are blocked |
 
 ## Requirements
@@ -66,18 +66,18 @@ cd leandex
 # 1. Install leandex into a control database.
 PGPASSWORD='your_password' \
   ./leandex install-control \
-  -H your_host -U your_user -C index_pilot_control
+  -H your_host -U your_user -C leandex_control
 
 # 2. Register a target database.
 PGPASSWORD='your_password' \
   ./leandex register-target \
-  -H your_host -U your_user -C index_pilot_control \
+  -H your_host -U your_user -C leandex_control \
   -T your_database --fdw-host your_host
 
 # 3. Verify installation, permissions, FDW security, and environment.
 PGPASSWORD='your_password' \
   ./leandex verify \
-  -H your_host -U your_user -C index_pilot_control
+  -H your_host -U your_user -C leandex_control
 ```
 
 Prefer `PGPASSWORD` or a password file over `-W/--password`; command-line passwords leak through shell history and process listings. Ask me how I know. Actually, don't.
@@ -87,7 +87,7 @@ Prefer `PGPASSWORD` or a password file over `-W/--password`; command-line passwo
 If you prefer plain `psql`, use the bundled installer:
 
 ```bash
-psql -h your_host -U your_user -d index_pilot_control -f leandex.sql
+psql -h your_host -U your_user -d leandex_control -f leandex.sql
 ```
 
 The `./leandex install-control` command uses `leandex.sql` when present and falls back to the split SQL files only for development.
@@ -97,34 +97,34 @@ The `./leandex install-control` command uses `leandex.sql` when present and fall
 Populate index state without rebuilding:
 
 ```sql
-select index_pilot.do_force_populate_index_stats('appdb', 'public', null, null);
+select leandex.do_force_populate_index_stats('appdb', 'public', null, null);
 ```
 
 Check estimated bloat:
 
 ```sql
 select *
-from index_pilot.get_index_bloat_estimates('appdb')
+from leandex.get_index_bloat_estimates('appdb')
 order by estimated_bloat desc;
 ```
 
 Run one maintenance cycle in dry-run style (`false` means do not rebuild):
 
 ```sql
-call index_pilot.periodic(false);
+call leandex.periodic(false);
 ```
 
 Run one maintenance cycle that may rebuild eligible indexes:
 
 ```sql
-call index_pilot.periodic(true);
+call leandex.periodic(true);
 ```
 
 View history:
 
 ```sql
 select *
-from index_pilot.history
+from leandex.history
 order by ts desc
 limit 20;
 ```
@@ -135,7 +135,7 @@ limit 20;
 graph TB
     subgraph "Control database"
         cron[pg_cron or external scheduler]
-        funcs[index_pilot SQL functions]
+        funcs[leandex SQL functions]
         fdw[postgres_fdw user mappings]
         hist[reindex_history]
         state[index_latest_state]
@@ -167,12 +167,12 @@ The control database is intentional. `reindex concurrently` cannot run inside a 
 
 ## Configuration
 
-Settings live in `index_pilot.config` and can be scoped globally, by database, schema, table, or index.
+Settings live in `leandex.config` and can be scoped globally, by database, schema, table, or index.
 
 Example:
 
 ```sql
-select index_pilot.set_or_replace_setting(
+select leandex.set_or_replace_setting(
   _datname => 'appdb',
   _schemaname => null,
   _relname => null,
@@ -191,8 +191,8 @@ With `pg_cron`:
 select cron.schedule_in_database(
   'leandex-maintenance',
   '0 3 * * *',
-  'call index_pilot.periodic(true);',
-  'index_pilot_control'
+  'call leandex.periodic(true);',
+  'leandex_control'
 );
 ```
 
@@ -200,8 +200,8 @@ With external cron:
 
 ```bash
 PGPASSWORD='your_password' psql \
-  -h your_host -U your_user -d index_pilot_control \
-  -c "call index_pilot.periodic(true);"
+  -h your_host -U your_user -d leandex_control \
+  -c "call leandex.periodic(true);"
 ```
 
 ## Repository layout
@@ -210,10 +210,10 @@ PGPASSWORD='your_password' psql \
 .
 ├── leandex                     # installer / admin CLI
 ├── leandex.sql                 # single-file SQL installer
-├── index_pilot.sh              # compatibility wrapper
-├── index_pilot_tables.sql      # split SQL: schema and tables
-├── index_pilot_functions.sql   # split SQL: core logic
-├── index_pilot_fdw.sql         # split SQL: FDW/dblink helpers
+├── leandex.sh              # compatibility wrapper
+├── leandex_tables.sql      # split SQL: schema and tables
+├── leandex_functions.sql   # split SQL: core logic
+├── leandex_fdw.sql         # split SQL: FDW/dblink helpers
 ├── uninstall.sql
 ├── docs/
 ├── test/
@@ -228,7 +228,7 @@ Local test run against an existing Postgres:
 
 ```bash
 PGPASSWORD=postgres ./test/run_tests.sh \
-  -h 127.0.0.1 -p 5432 -u postgres -w postgres -d test_index_pilot
+  -h 127.0.0.1 -p 5432 -u postgres -w postgres -d test_leandex
 ```
 
 GitHub Actions runs:
@@ -253,7 +253,7 @@ GitHub Actions runs:
 ```bash
 PGPASSWORD='your_password' \
   ./leandex uninstall \
-  -H your_host -U your_user -C index_pilot_control --drop-servers
+  -H your_host -U your_user -C leandex_control --drop-servers
 ```
 
 Or manually:

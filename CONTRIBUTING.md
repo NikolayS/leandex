@@ -25,42 +25,42 @@ docker run --rm -d --name pg_dev -e POSTGRES_PASSWORD=postgres -p 5432:5432 post
 ### Manual installation (control DB)
 ```bash
 # 1) Create control database
-psql -h <host> -U <admin_user> -c "create database index_pilot_control;"
+psql -h <host> -U <admin_user> -c "create database leandex_control;"
 
 # 2) Install required extensions in control DB
-psql -h <host> -U <admin_user> -d index_pilot_control -c "create extension if not exists postgres_fdw;"
-psql -h <host> -U <admin_user> -d index_pilot_control -c "create extension if not exists dblink;"
+psql -h <host> -U <admin_user> -d leandex_control -c "create extension if not exists postgres_fdw;"
+psql -h <host> -U <admin_user> -d leandex_control -c "create extension if not exists dblink;"
 
 # 3) Load schema and functions
-psql -h <host> -U <admin_user> -d index_pilot_control -f index_pilot_tables.sql
-psql -h <host> -U <admin_user> -d index_pilot_control -f index_pilot_functions.sql
-psql -h <host> -U <admin_user> -d index_pilot_control -f index_pilot_fdw.sql
+psql -h <host> -U <admin_user> -d leandex_control -f leandex_tables.sql
+psql -h <host> -U <admin_user> -d leandex_control -f leandex_functions.sql
+psql -h <host> -U <admin_user> -d leandex_control -f leandex_fdw.sql
 
 # Note: at this step you may see a WARNING from the internal permissions self-check.
 # It is expected before FDW self-connection is configured.
 
 # 4) Configure secure FDW self-connection (password stored in PG catalog)
-psql -h <host> -U <admin_user> -d index_pilot_control \
-  -c "select index_pilot.setup_connection('<host>', 5432, '<user>', '<password>');"
+psql -h <host> -U <admin_user> -d leandex_control \
+  -c "select leandex.setup_connection('<host>', 5432, '<user>', '<password>');"
 
 # 5) Verify environment
-psql -h <host> -U <admin_user> -d index_pilot_control -c "select * from index_pilot.check_permissions();"
-psql -h <host> -U <admin_user> -d index_pilot_control -c "select * from index_pilot.check_fdw_security_status();"
+psql -h <host> -U <admin_user> -d leandex_control -c "select * from leandex.check_permissions();"
+psql -h <host> -U <admin_user> -d leandex_control -c "select * from leandex.check_fdw_security_status();"
 ```
 
 ### Register a target database (inventory row + FDW server)
 ```sql
-insert into index_pilot.target_databases(database_name, host, port, fdw_server_name)
+insert into leandex.target_databases(database_name, host, port, fdw_server_name)
 values ('<target_db>', '<target_host>', 5432, 'target_<target_db>');
 ```
 
 ### Run
 ```sql
 -- dry run (no reindex)
-call index_pilot.periodic(false);
+call leandex.periodic(false);
 
 -- real run (may reindex eligible indexes)
-call index_pilot.periodic(true);
+call leandex.periodic(true);
 ```
 
 ## Testing
@@ -136,8 +136,8 @@ Additional guidance:
 ## Reporting issues
 Please include:
 - PostgreSQL version (`select current_setting('server_version');`)
-- `select index_pilot.version();`
-- Output of `select * from index_pilot.check_fdw_security_status();` and `select * from index_pilot.check_permissions();`
+- `select leandex.version();`
+- Output of `select * from leandex.check_fdw_security_status();` and `select * from leandex.check_permissions();`
 - Recent failures if relevant
 - Minimal reproduction steps and expected vs actual behavior
 

@@ -57,10 +57,10 @@ For the full reference of installer subcommands, options, defaults, and examples
 For manual installs, prefer the bundled SQL file:
 
 ```bash
-psql -h your_host -U your_user -d index_pilot_control -f leandex.sql
+psql -h your_host -U your_user -d leandex_control -f leandex.sql
 ```
 
-The split `index_pilot_*.sql` files are kept for development and reviewable diffs.
+The split `leandex_*.sql` files are kept for development and reviewable diffs.
 
 ### Manual installation
 
@@ -72,30 +72,30 @@ git clone https://github.com/NikolayS/leandex.git
 cd leandex
 
 # 1. Create control database (as admin user)
-psql -h your-instance.region.rds.amazonaws.com -U postgres -c "create database index_pilot_control;"
+psql -h your-instance.region.rds.amazonaws.com -U postgres -c "create database leandex_control;"
 
 # 2. Install required extensions in control database
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -c "CREATE EXTENSION IF NOT EXISTS postgres_fdw;"
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -c "CREATE EXTENSION IF NOT EXISTS dblink;"
+psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -c "CREATE EXTENSION IF NOT EXISTS postgres_fdw;"
+psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -c "CREATE EXTENSION IF NOT EXISTS dblink;"
 
 # 3. Install leandex in the control database
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -f leandex.sql
+psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -f leandex.sql
 
 # 4. Create FDW server and user mapping for the TARGET database
 #    fdw_server_name must refer to a foreign server that points to the TARGET DB
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control <<'SQL'
+psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control <<'SQL'
 create server if not exists target_your_database foreign data wrapper postgres_fdw
   options (host 'your-instance.region.rds.amazonaws.com', port '5432', dbname 'your_database');
 
--- dblink_connect(server_name) uses current_user mapping; create mapping for the user running control DB (often postgres or index_pilot)
+-- dblink_connect(server_name) uses current_user mapping; create mapping for the user running control DB (often postgres or leandex)
 create user mapping if not exists for current_user server target_your_database
   options (user 'remote_owner_or_role', password 'remote_password');
 
 SQL
 
-# 5. Register the TARGET database (links index_pilot.target_databases to your FDW server)
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control <<'SQL'
-insert into index_pilot.target_databases(database_name, host, port, fdw_server_name, enabled)
+# 5. Register the TARGET database (links leandex.target_databases to your FDW server)
+psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control <<'SQL'
+insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
 values ('your_database', 'your-instance.region.rds.amazonaws.com', 5432, 'target_your_database', true)
 on conflict (database_name) do update
   set
@@ -106,8 +106,8 @@ on conflict (database_name) do update
 SQL
 
 # 6. Verify FDW and environment
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -c "select * from index_pilot.check_fdw_security_status()"
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d index_pilot_control -c "select * from index_pilot.check_environment();"
+psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -c "select * from leandex.check_fdw_security_status()"
+psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -c "select * from leandex.check_environment();"
 ```
 
 #### Self-hosted PostgreSQL example
@@ -118,17 +118,17 @@ git clone https://github.com/NikolayS/leandex.git
 cd leandex
 
 # 1. Create control database (as superuser)
-psql -U postgres -c "create database index_pilot_control;"
+psql -U postgres -c "create database leandex_control;"
 
 # 2. Install required extensions in control database (as superuser)
-psql -U postgres -d index_pilot_control -c "CREATE EXTENSION IF NOT EXISTS postgres_fdw;"
-psql -U postgres -d index_pilot_control -c "CREATE EXTENSION IF NOT EXISTS dblink;"
+psql -U postgres -d leandex_control -c "CREATE EXTENSION IF NOT EXISTS postgres_fdw;"
+psql -U postgres -d leandex_control -c "CREATE EXTENSION IF NOT EXISTS dblink;"
 
 # 3. Install leandex in the control database (as superuser)
-psql -U postgres -d index_pilot_control -f leandex.sql
+psql -U postgres -d leandex_control -f leandex.sql
 
 # 4. Create FDW server and user mapping for the TARGET database
-psql -U postgres -d index_pilot_control <<'SQL'
+psql -U postgres -d leandex_control <<'SQL'
 create server if not exists target_your_database foreign data wrapper postgres_fdw
   options (host '127.0.0.1', port '5432', dbname 'your_database');
 
@@ -136,17 +136,17 @@ create user mapping if not exists for current_user server target_your_database
   options (user 'remote_owner_or_role', password 'remote_password');
 SQL
 
-# 5. Register the TARGET database (links index_pilot.target_databases to your FDW server)
-psql -U postgres -d index_pilot_control <<'SQL'
-insert into index_pilot.target_databases(database_name, host, port, fdw_server_name, enabled)
+# 5. Register the TARGET database (links leandex.target_databases to your FDW server)
+psql -U postgres -d leandex_control <<'SQL'
+insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
 values ('your_database', '127.0.0.1', 5432, 'target_your_database', true)
 on conflict (database_name) do update
   set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;
 SQL
 
 # 6. Verify
-psql -U postgres -d index_pilot_control -c "select * from index_pilot.check_fdw_security_status()"
-psql -U postgres -d index_pilot_control -c "select * from index_pilot.check_environment();"
+psql -U postgres -d leandex_control -c "select * from leandex.check_fdw_security_status()"
+psql -U postgres -d leandex_control -c "select * from leandex.check_environment();"
 ```
 ### Verification checklist
 
@@ -154,11 +154,11 @@ Run in CONTROL_DB after installation/registration:
 
 ```sql
 -- FDW basic status
-select * from index_pilot.check_fdw_security_status();
+select * from leandex.check_fdw_security_status();
 
 -- Environment and targets
-select * from index_pilot.check_environment();
-select * from index_pilot.target_databases;
+select * from leandex.check_environment();
+select * from leandex.target_databases;
 
 -- psql helpers
 \des+   -- foreign servers
@@ -171,23 +171,23 @@ After registering targets, you may want to initialize a bloat baseline and inspe
 
 ```sql
 -- Initialize baseline without reindexing (sets best_ratio for sufficiently large indexes)
-select index_pilot.do_force_populate_index_stats('<TARGET_DB>', null, null, null);
+select leandex.do_force_populate_index_stats('<TARGET_DB>', null, null, null);
 
 -- List indexes that periodic(true) would process under current thresholds
 select
   schemaname, relname, indexrelname,
   pg_size_pretty(indexsize) as size,
   round(estimated_bloat::numeric, 2) as bloat_x
-from index_pilot.get_index_bloat_estimates('<TARGET_DB>')
-where indexsize >= pg_size_bytes(index_pilot.get_setting(datname, schemaname, relname, indexrelname, 'index_size_threshold'))
-  and coalesce(index_pilot.get_setting(datname, schemaname, relname, indexrelname, 'skip')::boolean, false) = false
+from leandex.get_index_bloat_estimates('<TARGET_DB>')
+where indexsize >= pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_size_threshold'))
+  and coalesce(leandex.get_setting(datname, schemaname, relname, indexrelname, 'skip')::boolean, false) = false
   and (estimated_bloat is null
-       or estimated_bloat >= index_pilot.get_setting(datname, schemaname, relname, indexrelname, 'index_rebuild_scale_factor')::float)
+       or estimated_bloat >= leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_rebuild_scale_factor')::float)
 order by estimated_bloat desc nulls first
 limit 50;
 
 -- Run a real pass when ready
-call index_pilot.periodic(true,false);
+call leandex.periodic(true,false);
 ```
 
 Notes:
@@ -198,10 +198,10 @@ Exclude service schemas if desired (e.g., TOAST or TimescaleDB internals):
 
 ```sql
 -- Skip TOAST indexes in target DB
-select index_pilot.set_or_replace_setting('<TARGET_DB>','pg_toast',null,null,'skip','true',null);
+select leandex.set_or_replace_setting('<TARGET_DB>','pg_toast',null,null,'skip','true',null);
 
 -- Skip TimescaleDB internal chunks
-select index_pilot.set_or_replace_setting('<TARGET_DB>','_timescaledb_internal',null,null,'skip','true',null);
+select leandex.set_or_replace_setting('<TARGET_DB>','_timescaledb_internal',null,null,'skip','true',null);
 ```
 
 ### Troubleshooting
@@ -217,7 +217,7 @@ select index_pilot.set_or_replace_setting('<TARGET_DB>','_timescaledb_internal',
 
 - How to see reindex progress
   - On target DB: `select * from pg_stat_progress_create_index where command='REINDEX CONCURRENTLY';`
-  - History in control DB: `select * from index_pilot.history order by ts desc limit 20;`
+  - History in control DB: `select * from leandex.history order by ts desc limit 20;`
 
 
 ### AWS RDS / Aurora specifics
@@ -238,7 +238,7 @@ The core flow above works the same on AWS. The following items are specific to R
 
 - Monitoring and logs
   - Progress on target DB: `select * from pg_stat_progress_create_index where command='REINDEX CONCURRENTLY';`
-  - History in control DB: `select * from index_pilot.history order by ts desc limit 20;`
+  - History in control DB: `select * from leandex.history order by ts desc limit 20;`
   - Instance logs: use CloudWatch Logs.
 
 

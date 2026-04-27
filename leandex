@@ -98,10 +98,10 @@ Environment:
   PGPASSWORD                PostgreSQL password (safer than -W)
 
 Examples:
-  leandex install-control -H db.example.com -U postgres -C index_pilot_control
-  leandex register-target -H db.example.com -U postgres -C index_pilot_control -T appdb --fdw-host 127.0.0.1
-  leandex verify -H db.example.com -U postgres -C index_pilot_control
-  leandex uninstall -H db.example.com -U postgres -C index_pilot_control --drop-servers
+  leandex install-control -H db.example.com -U postgres -C leandex_control
+  leandex register-target -H db.example.com -U postgres -C leandex_control -T appdb --fdw-host 127.0.0.1
+  leandex verify -H db.example.com -U postgres -C leandex_control
+  leandex uninstall -H db.example.com -U postgres -C leandex_control --drop-servers
 USAGE
 }
 
@@ -110,7 +110,7 @@ DB_HOST="localhost"
 DB_PORT="5432"
 DB_USER="${USER:-postgres}"
 DB_PASS="${PGPASSWORD:-}"
-CONTROL_DB="index_pilot_control"
+CONTROL_DB="leandex_control"
 FDW_HOST_OVERRIDE=""
 QUIET_ARGS=("-X")
 CREATE_DB=true
@@ -236,15 +236,15 @@ install_control() {
   if [[ -f "${SCRIPT_DIR}/leandex.sql" ]]; then
     psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/leandex.sql"
   else
-    psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/index_pilot_tables.sql"
-    psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/index_pilot_functions.sql"
-    psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/index_pilot_fdw.sql"
+    psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/leandex_tables.sql"
+    psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/leandex_functions.sql"
+    psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/leandex_fdw.sql"
   fi
 
   print_info "Verifying installation"
-  psql_cmd "${CONTROL_DB}" "select 'Version: '||index_pilot.version();"
-  psql_cmd "${CONTROL_DB}" "select * from index_pilot.check_fdw_security_status();" | sed 's/^/  /'
-  psql_cmd "${CONTROL_DB}" "select * from index_pilot.check_environment();" | sed 's/^/  /'
+  psql_cmd "${CONTROL_DB}" "select 'Version: '||leandex.version();"
+  psql_cmd "${CONTROL_DB}" "select * from leandex.check_fdw_security_status();" | sed 's/^/  /'
+  psql_cmd "${CONTROL_DB}" "select * from leandex.check_environment();" | sed 's/^/  /'
   print_ok "Installation complete in ${CONTROL_DB}"
 }
 
@@ -318,7 +318,7 @@ register_target() {
   end \$\$;"
 
   # Upsert into target_databases
-  psql_cmd "${CONTROL_DB}" "insert into index_pilot.target_databases(database_name, host, port, fdw_server_name, enabled)
+  psql_cmd "${CONTROL_DB}" "insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
     values ('${TARGET_DB}', '${fdw_host}', ${DB_PORT}, '${server}', true)
     on conflict (database_name) do update set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;"
 
@@ -332,7 +332,7 @@ register_target() {
   fi
 
   print_info "Testing secure FDW connection via internal helper"
-  if psql_cmd "${CONTROL_DB}" "select index_pilot._connect_securely('${TARGET_DB}'::name);" > /dev/null 2>&1; then
+  if psql_cmd "${CONTROL_DB}" "select leandex._connect_securely('${TARGET_DB}'::name);" > /dev/null 2>&1; then
     print_ok "FDW connection OK for target database '${TARGET_DB}'"
   else
     print_err "FDW connection test failed. Verify user mapping and network access."
@@ -368,16 +368,16 @@ verify_all() {
     exit 1
   fi
   print_info "Checking version"
-  psql_cmd "${CONTROL_DB}" "select index_pilot.version();"
+  psql_cmd "${CONTROL_DB}" "select leandex.version();"
 
   print_info "Checking permissions"
-  psql_cmd "${CONTROL_DB}" "select * from index_pilot.check_permissions();" | sed 's/^/  /'
+  psql_cmd "${CONTROL_DB}" "select * from leandex.check_permissions();" | sed 's/^/  /'
 
   print_info "Checking FDW security status"
-  psql_cmd "${CONTROL_DB}" "select * from index_pilot.check_fdw_security_status();" | sed 's/^/  /'
+  psql_cmd "${CONTROL_DB}" "select * from leandex.check_fdw_security_status();" | sed 's/^/  /'
 
   print_info "Environment check"
-  psql_cmd "${CONTROL_DB}" "select * from index_pilot.check_environment();" | sed 's/^/  /'
+  psql_cmd "${CONTROL_DB}" "select * from leandex.check_environment();" | sed 's/^/  /'
 
   print_ok "Verification complete"
 }
@@ -413,9 +413,9 @@ uninstall_all() {
   psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/uninstall.sql"
 
   if [[ "${DROP_SERVERS}" == true ]]; then
-    print_info "Dropping FDW servers referenced by index_pilot.target_databases (best effort)"
+    print_info "Dropping FDW servers referenced by leandex.target_databases (best effort)"
     psql_cmd "${CONTROL_DB}" "do \$\$ declare r record; begin
-      for r in select fdw_server_name from index_pilot.target_databases loop
+      for r in select fdw_server_name from leandex.target_databases loop
         begin
           execute format('drop server if exists %I cascade', r.fdw_server_name);
         exception when others then

@@ -9,7 +9,7 @@ exec > >(tee -a e2e.log) 2>&1
 export PAGER=cat
 DB_HOST="${DB_HOST:-postgres}"
 DB_PORT="${DB_PORT:-5432}"
-DB_NAME="${DB_NAME:-test_index_pilot}"
+DB_NAME="${DB_NAME:-test_leandex}"
 DB_USER="${POSTGRES_USER:-${DB_USER:-postgres}}"
 DB_PASS="${POSTGRES_PASSWORD:-${DB_PASS:-postgres}}"
 
@@ -64,25 +64,25 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 if [[ -f "${REPO_DIR}/leandex.sql" ]]; then
   psql_f "${CONTROL_DB}" "${REPO_DIR}/leandex.sql"
 else
-  psql_f "${CONTROL_DB}" "${REPO_DIR}/index_pilot_tables.sql"
-  psql_f "${CONTROL_DB}" "${REPO_DIR}/index_pilot_functions.sql"
-  psql_f "${CONTROL_DB}" "${REPO_DIR}/index_pilot_fdw.sql"
+  psql_f "${CONTROL_DB}" "${REPO_DIR}/leandex_tables.sql"
+  psql_f "${CONTROL_DB}" "${REPO_DIR}/leandex_functions.sql"
+  psql_f "${CONTROL_DB}" "${REPO_DIR}/leandex_fdw.sql"
 fi
 
 echo "Setting up FDW server and registration (self-host 127.0.0.1)"
-psql_c "${CONTROL_DB}" "drop server if exists index_pilot_target cascade;"
-psql_c "${CONTROL_DB}" "create server index_pilot_target foreign data wrapper postgres_fdw options (host '127.0.0.1', port '${DB_PORT}', dbname '${TARGET_DB}');"
-psql_c "${CONTROL_DB}" "insert into index_pilot.target_databases(database_name, host, port, fdw_server_name, enabled) values ('${TARGET_DB}', '127.0.0.1', ${DB_PORT}, 'index_pilot_target', true) on conflict (database_name) do update set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;"
-psql_c "${CONTROL_DB}" "drop user mapping if exists for \"${DB_USER}\" server index_pilot_target;"
-psql_c "${CONTROL_DB}" "create user mapping for \"${DB_USER}\" server index_pilot_target options (user '${DB_USER}', password '${DB_PASS}');"
+psql_c "${CONTROL_DB}" "drop server if exists leandex_target cascade;"
+psql_c "${CONTROL_DB}" "create server leandex_target foreign data wrapper postgres_fdw options (host '127.0.0.1', port '${DB_PORT}', dbname '${TARGET_DB}');"
+psql_c "${CONTROL_DB}" "insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled) values ('${TARGET_DB}', '127.0.0.1', ${DB_PORT}, 'leandex_target', true) on conflict (database_name) do update set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;"
+psql_c "${CONTROL_DB}" "drop user mapping if exists for \"${DB_USER}\" server leandex_target;"
+psql_c "${CONTROL_DB}" "create user mapping for \"${DB_USER}\" server leandex_target options (user '${DB_USER}', password '${DB_PASS}');"
 
 echo "Testing secure FDW connectivity"
-psql_c "${CONTROL_DB}" "select index_pilot._connect_securely('${TARGET_DB}'::name);"
+psql_c "${CONTROL_DB}" "select leandex._connect_securely('${TARGET_DB}'::name);"
 
 echo "Creating e2e test data (1,000,000 rows) on target"
 psql_c "${CONTROL_DB}" "do \$\$
 begin
-  perform index_pilot._connect_securely('${TARGET_DB}'::name);
+  perform leandex._connect_securely('${TARGET_DB}'::name);
   perform dblink_exec('${TARGET_DB}', \$db\$
     create schema if not exists e2e;
     drop table if exists e2e.ci_table cascade;
@@ -101,16 +101,16 @@ end
 \$\$;"
 
 echo "Initialize baseline and snapshot"
-psql_c "${CONTROL_DB}" "call index_pilot.periodic(false);"
-psql_c "${CONTROL_DB}" "select index_pilot.do_force_populate_index_stats('${TARGET_DB}', 'e2e', null, null);"
+psql_c "${CONTROL_DB}" "call leandex.periodic(false);"
+psql_c "${CONTROL_DB}" "select leandex.do_force_populate_index_stats('${TARGET_DB}', 'e2e', null, null);"
 
 echo "Lower rebuild threshold for CI to ensure reindex triggers"
-psql_c "${CONTROL_DB}" "select index_pilot.set_or_replace_setting('${TARGET_DB}', null, null, null, 'index_rebuild_scale_factor', '1.05', 'CI threshold');"
+psql_c "${CONTROL_DB}" "select leandex.set_or_replace_setting('${TARGET_DB}', null, null, null, 'index_rebuild_scale_factor', '1.05', 'CI threshold');"
 
 echo "Induce bloat: delete ~60% rows and update some"
 psql_c "${CONTROL_DB}" "do \$\$
 begin
-  perform index_pilot._connect_securely('${TARGET_DB}'::name);
+  perform leandex._connect_securely('${TARGET_DB}'::name);
   perform dblink_exec('${TARGET_DB}', \$db\$
     delete from e2e.ci_table where id % 5 in (0,1,2);
     update e2e.ci_table set status = 'u' where id % 10 = 0;
@@ -120,21 +120,21 @@ end
 \$\$;"
 
 echo "Update snapshot and measure bloat before"
-psql_c "${CONTROL_DB}" "call index_pilot.periodic(false);"
+psql_c "${CONTROL_DB}" "call leandex.periodic(false);"
 
-BLOAT_BEFORE=$(psql_c "${CONTROL_DB}" "select coalesce(max(estimated_bloat),1.0) from index_pilot.get_index_bloat_estimates('${TARGET_DB}') where schemaname='e2e' and indexrelname='idx_e2e_email';")
+BLOAT_BEFORE=$(psql_c "${CONTROL_DB}" "select coalesce(max(estimated_bloat),1.0) from leandex.get_index_bloat_estimates('${TARGET_DB}') where schemaname='e2e' and indexrelname='idx_e2e_email';")
 echo "estimated_bloat before: ${BLOAT_BEFORE}"
 
 echo "Run periodic real pass (reindex if above threshold)"
-psql_c "${CONTROL_DB}" "call index_pilot.periodic(true,false);"
+psql_c "${CONTROL_DB}" "call leandex.periodic(true,false);"
 
 echo "Measure sizes before/after from history for our index"
-HISTORY_ROW=$(psql_c "${CONTROL_DB}" "select indexsize_before || '|' || indexsize_after from index_pilot.reindex_history where datname='${TARGET_DB}' and schemaname='e2e' and indexrelname='idx_e2e_email' and status='completed' order by entry_timestamp desc limit 1;")
+HISTORY_ROW=$(psql_c "${CONTROL_DB}" "select indexsize_before || '|' || indexsize_after from leandex.reindex_history where datname='${TARGET_DB}' and schemaname='e2e' and indexrelname='idx_e2e_email' and status='completed' order by entry_timestamp desc limit 1;")
 IFS='|' read -r SIZE_BEFORE SIZE_AFTER <<< "${HISTORY_ROW}"
 
 if [[ -z "${SIZE_BEFORE}" || -z "${SIZE_AFTER}" ]]; then
   echo "No completed reindex record found for idx_e2e_email" >&2
-  psql_c "${CONTROL_DB}" "select datname, schemaname, relname, indexrelname, status, indexsize_before, indexsize_after from index_pilot.reindex_history order by entry_timestamp desc limit 20;" >&2
+  psql_c "${CONTROL_DB}" "select datname, schemaname, relname, indexrelname, status, indexsize_before, indexsize_after from leandex.reindex_history order by entry_timestamp desc limit 20;" >&2
   exit 1
 fi
 

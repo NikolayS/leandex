@@ -11,8 +11,8 @@ PGPASSWORD='your_password' ./leandex verify -H <host> -U <user> -C <control_db>
 
 - **What are the common flags and defaults?**
   - `-H/--host`: PostgreSQL host
-  - `-P/--port`: Port 
-  - `-U/--user`: User 
+  - `-P/--port`: Port
+  - `-U/--user`: User
   - `-W/--password`: Password (prefer `PGPASSWORD` env)
   - `-C/--control-db`: Control DB
   - `--fdw-host`: Host used inside FDW (default same as `--host`)
@@ -45,11 +45,11 @@ PGPASSWORD='your_password' ./leandex uninstall -H <host> -U <user> -C <control_d
 
 - **How do I see current bloat for a DB?** - Query estimates and sort by bloat.
 ```sql
-select 
+select
   indexrelname,
   pg_size_pretty(indexsize) as current_size,
   round(estimated_bloat::numeric, 2) as bloat_x
-from index_pilot.get_index_bloat_estimates('<db>')
+from leandex.get_index_bloat_estimates('<db>')
 order by estimated_bloat desc nulls last
 limit 50;  -- adjust as needed
 ```
@@ -57,30 +57,30 @@ limit 50;  -- adjust as needed
 - **How do I change the reindex threshold?** - Set `index_rebuild_scale_factor` at the desired scope.
 ```sql
 -- Global: rebuild when bloat ≥ 2x
-select index_pilot.set_or_replace_setting(null, null, null, null, 'index_rebuild_scale_factor', '2', 'default policy');
+select leandex.set_or_replace_setting(null, null, null, null, 'index_rebuild_scale_factor', '2', 'default policy');
 ```
 
 - **How do I ignore small indexes?** - Raise `index_size_threshold` per DB.
 ```sql
-select index_pilot.set_or_replace_setting('<db>', null, null, null, 'index_size_threshold', '100MB', 'skip small indexes in this DB');
+select leandex.set_or_replace_setting('<db>', null, null, null, 'index_size_threshold', '100MB', 'skip small indexes in this DB');
 ```
 
 - **How do I initialize baseline from current sizes (no reindex)?** - Pre-populate stats.
 ```sql
-select index_pilot.do_force_populate_index_stats('<db>', null, null, null);
+select leandex.do_force_populate_index_stats('<db>', null, null, null);
 ```
 
 - **How do I check the effective value for a setting?** - Use the resolver.
 ```sql
-select index_pilot.get_setting('<db>', '<schema>', '<table>', '<index>', 'index_rebuild_scale_factor');
+select leandex.get_setting('<db>', '<schema>', '<table>', '<index>', 'index_rebuild_scale_factor');
 ```
 
 ### Behavior
 
-- **What does `index_pilot.periodic()` do?** - Scans registered targets, estimates bloat, runs REINDEX CONCURRENTLY for eligible indexes, and records history.
+- **What does `leandex.periodic()` do?** - Scans registered targets, estimates bloat, runs REINDEX CONCURRENTLY for eligible indexes, and records history.
 ```sql
-call index_pilot.periodic(false);  -- dry run
-call index_pilot.periodic(true);   -- real run
+call leandex.periodic(false);  -- dry run
+call leandex.periodic(true);   -- real run
 ```
 
 - **Does it operate in the control DB or target DB?** - Control DB only; it never reindexes the current DB by design.
@@ -89,7 +89,7 @@ call index_pilot.periodic(true);   -- real run
 
 - **Can I reindex a single index?** - Yes, use manual procedure.
 ```sql
-call index_pilot.do_reindex('<db>', '<schema>', '<table>', '<index>', false);  -- set last arg true to force
+call leandex.do_reindex('<db>', '<schema>', '<table>', '<index>', false);  -- set last arg true to force
 ```
 
 ### Security
@@ -98,19 +98,19 @@ call index_pilot.do_reindex('<db>', '<schema>', '<table>', '<index>', false);  -
 
 - **How do I verify FDW security status?** - Run the check.
 ```sql
-select * from index_pilot.check_fdw_security_status();
+select * from leandex.check_fdw_security_status();
 ```
 
 - **Can non-superusers operate it?** - Yes, if grants/mappings are set; verify readiness.
 ```sql
-select * from index_pilot.check_permissions();
+select * from leandex.check_permissions();
 ```
 
 ### Operations
 
 - **How do I register target databases?** - Insert into inventory.
 ```sql
-insert into index_pilot.target_databases(database_name, host, port, fdw_server_name)
+insert into leandex.target_databases(database_name, host, port, fdw_server_name)
 values ('<target_db_name>', '<target_host>', 5432, 'target_<target_db_name>');
 ```
 
@@ -118,26 +118,26 @@ values ('<target_db_name>', '<target_host>', 5432, 'target_<target_db_name>');
 ```sql
 select cron.schedule_in_database(
   'leandex_daily', '0 2 * * *',
-  'select index_pilot.periodic(real_run := true);',
-  '<index_pilot_control_db>'
+  'select leandex.periodic(real_run := true);',
+  '<leandex_control_db>'
 );
 ```
 
 - **How do I pause all reindexing immediately?** - Set global skip.
 ```sql
-select index_pilot.set_or_replace_setting(null, null, null, null, 'skip', 'true', 'global pause');
+select leandex.set_or_replace_setting(null, null, null, null, 'skip', 'true', 'global pause');
 ```
 
 - **How do I disable or enable a specific target DB?** - Toggle `enabled`.
 ```sql
-update index_pilot.target_databases set enabled = false where database_name = '<db>';
-update index_pilot.target_databases set enabled = true  where database_name = '<db>';
+update leandex.target_databases set enabled = false where database_name = '<db>';
+update leandex.target_databases set enabled = true  where database_name = '<db>';
 ```
 
 - **How do I uninstall from the control DB?** - Run the provided script.
 ```bash
 # WARNING: removes schema and history in the specified database
-psql -h <host> -U <user> -d <index_pilot_control_db> -f uninstall.sql
+psql -h <host> -U <user> -d <leandex_control_db> -f uninstall.sql
 ```
 
 ### Performance
@@ -148,8 +148,8 @@ psql -h <host> -U <user> -d <index_pilot_control_db> -f uninstall.sql
 
 - **How do I monitor progress and recent actions?** - Check current work and history.
 ```sql
-select * from index_pilot.current_processed_index order by mtime desc; -- in-progress
-select * from index_pilot.history order by ts desc limit 50;  -- recent events
+select * from leandex.current_processed_index order by mtime desc; -- in-progress
+select * from leandex.history order by ts desc limit 50;  -- recent events
 ```
 
 ### Scope

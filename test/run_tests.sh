@@ -9,7 +9,7 @@ set -o pipefail # Still fail on pipe errors
 # Default values
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
-DB_NAME="${DB_NAME:-test_index_pilot}"
+DB_NAME="${DB_NAME:-test_leandex}"
 DB_USER="${DB_USER:-postgres}"
 DB_PASS="${DB_PASS:-}"
 INSTALL_ONLY="${INSTALL_ONLY:-false}"
@@ -39,7 +39,7 @@ usage() {
     echo "Options:"
     echo "  -h HOST       Database host (default: localhost)"
     echo "  -p PORT       Database port (default: 5432)"
-    echo "  -d DATABASE   Database name (default: test_index_pilot)"
+    echo "  -d DATABASE   Database name (default: test_leandex)"
     echo "  -u USER       Database user (default: postgres)"
     echo "  -w PASSWORD   Database password"
     echo "  -i            Install only, don't run tests"
@@ -52,7 +52,7 @@ usage() {
     echo "Examples:"
     echo "  $0 -h localhost -u postgres -w password    # Full test with setup"
     echo "  SKIP_CLEANUP=true $0 -u postgres           # Keep databases after tests"
-    echo "  $0 -s -u index_pilot                       # Non-superuser tests only"
+    echo "  $0 -s -u leandex                       # Non-superuser tests only"
   } >&2
   exit 1
 }
@@ -147,27 +147,27 @@ if [[ "${SKIP_INSTALL}" != "true" ]]; then
   psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "CREATE EXTENSION IF NOT EXISTS postgres_fdw"
 
   # Install schema and functions in control database
-  if [[ -f "index_pilot_tables.sql" ]]; then
-    if ! run_sql "index_pilot_tables.sql" "Schema installation" "${CONTROL_DB}"; then
+  if [[ -f "leandex_tables.sql" ]]; then
+    if ! run_sql "leandex_tables.sql" "Schema installation" "${CONTROL_DB}"; then
       echo -e "${RED}Error: Schema installation failed${NC}" >&2
       exit 1
     fi
-    if ! run_sql "index_pilot_functions.sql" "Functions installation" "${CONTROL_DB}"; then
+    if ! run_sql "leandex_functions.sql" "Functions installation" "${CONTROL_DB}"; then
       exit 1
     fi
-    if ! run_sql "index_pilot_fdw.sql" "FDW functions installation" "${CONTROL_DB}"; then
+    if ! run_sql "leandex_fdw.sql" "FDW functions installation" "${CONTROL_DB}"; then
       echo -e "${RED}Error: Functions installation failed${NC}" >&2
       exit 1
     fi
-  elif [[ -f "../index_pilot_tables.sql" ]]; then
-    if ! run_sql "../index_pilot_tables.sql" "Schema installation" "${CONTROL_DB}"; then
+  elif [[ -f "../leandex_tables.sql" ]]; then
+    if ! run_sql "../leandex_tables.sql" "Schema installation" "${CONTROL_DB}"; then
       echo -e "${RED}Error: Schema installation failed${NC}" >&2
       exit 1
     fi
-    if ! run_sql "../index_pilot_functions.sql" "Functions installation" "${CONTROL_DB}"; then
+    if ! run_sql "../leandex_functions.sql" "Functions installation" "${CONTROL_DB}"; then
       exit 1
     fi
-    if ! run_sql "../index_pilot_fdw.sql" "FDW functions installation" "${CONTROL_DB}"; then
+    if ! run_sql "../leandex_fdw.sql" "FDW functions installation" "${CONTROL_DB}"; then
       echo -e "${RED}Error: Functions installation failed${NC}" >&2
       exit 1
     fi
@@ -200,13 +200,13 @@ if [[ "${SKIP_INSTALL}" != "true" ]]; then
 
     # Drop existing server if any
     psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-            DROP SERVER IF EXISTS index_pilot_target CASCADE;
-            DELETE FROM index_pilot.target_databases WHERE fdw_server_name = 'index_pilot_target';
+            DROP SERVER IF EXISTS leandex_target CASCADE;
+            DELETE FROM leandex.target_databases WHERE fdw_server_name = 'leandex_target';
         " 2> /dev/null || true
 
     # Create FDW server
     if psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-            CREATE SERVER index_pilot_target
+            CREATE SERVER leandex_target
             FOREIGN DATA WRAPPER postgres_fdw
             OPTIONS (host '${FDW_HOST}', port '${DB_PORT}', dbname '${TARGET_DB}');
         " 2> /dev/null; then
@@ -214,8 +214,8 @@ if [[ "${SKIP_INSTALL}" != "true" ]]; then
 
       # Register target database
       psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-                INSERT INTO index_pilot.target_databases (database_name, host, port, fdw_server_name, enabled)
-                VALUES ('${TARGET_DB}', '${FDW_HOST}', ${DB_PORT}, 'index_pilot_target', true);
+                INSERT INTO leandex.target_databases (database_name, host, port, fdw_server_name, enabled)
+                VALUES ('${TARGET_DB}', '${FDW_HOST}', ${DB_PORT}, 'leandex_target', true);
             " 2> /dev/null || true
 
       FDW_SETUP_SUCCESS=true
@@ -232,11 +232,11 @@ if [[ "${SKIP_INSTALL}" != "true" ]]; then
   # Setup user mapping with password if provided
   if [[ -n "${DB_PASS}" ]]; then
     psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-            CREATE USER MAPPING FOR ${DB_USER} SERVER index_pilot_target OPTIONS (user '${DB_USER}', password '${DB_PASS}');
+            CREATE USER MAPPING FOR ${DB_USER} SERVER leandex_target OPTIONS (user '${DB_USER}', password '${DB_PASS}');
         " || echo "Warning: Could not setup user mapping"
   else
     psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-            CREATE USER MAPPING FOR ${DB_USER} SERVER index_pilot_target;
+            CREATE USER MAPPING FOR ${DB_USER} SERVER leandex_target;
         " || echo "Warning: Could not setup user mapping"
   fi
 
@@ -246,7 +246,7 @@ if [[ "${SKIP_INSTALL}" != "true" ]]; then
 
   # Try to test the connection from control to target database
   if psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-        SELECT index_pilot._connect_securely('${TARGET_DB}'::name);
+        SELECT leandex._connect_securely('${TARGET_DB}'::name);
     " 2> /dev/null; then
     FDW_TEST_SUCCESS=true
     echo -e "${GREEN}✓ FDW connection test successful${NC}"
@@ -265,21 +265,21 @@ if [[ "${SKIP_INSTALL}" != "true" ]]; then
 
         # Recreate FDW with actual IP
         psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-                    DROP SERVER IF EXISTS index_pilot_target CASCADE;
-                    DELETE FROM index_pilot.target_databases WHERE fdw_server_name = 'index_pilot_target';
-                    CREATE SERVER index_pilot_target
+                    DROP SERVER IF EXISTS leandex_target CASCADE;
+                    DELETE FROM leandex.target_databases WHERE fdw_server_name = 'leandex_target';
+                    CREATE SERVER leandex_target
                     FOREIGN DATA WRAPPER postgres_fdw
                     OPTIONS (host '${POSTGRES_IP}', port '${DB_PORT}', dbname '${TARGET_DB}');
-                    INSERT INTO index_pilot.target_databases (database_name, host, port, fdw_server_name, enabled)
-                    VALUES ('${TARGET_DB}', '${POSTGRES_IP}', ${DB_PORT}, 'index_pilot_target', true);
-                    CREATE USER MAPPING FOR ${DB_USER} SERVER index_pilot_target OPTIONS (user '${DB_USER}', password '${DB_PASS}');
+                    INSERT INTO leandex.target_databases (database_name, host, port, fdw_server_name, enabled)
+                    VALUES ('${TARGET_DB}', '${POSTGRES_IP}', ${DB_PORT}, 'leandex_target', true);
+                    CREATE USER MAPPING FOR ${DB_USER} SERVER leandex_target OPTIONS (user '${DB_USER}', password '${DB_PASS}');
                 " 2> /dev/null
 
         # Note: For RDS, ensure current_user has proper user mapping
 
         # Test again with IP
         if psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-                    SELECT index_pilot._connect_securely('${TARGET_DB}'::name);
+                    SELECT leandex._connect_securely('${TARGET_DB}'::name);
                 " 2> /dev/null; then
           FDW_TEST_SUCCESS=true
           echo -e "${GREEN}✓ FDW connection test successful with IP: ${POSTGRES_IP}${NC}"
@@ -295,12 +295,12 @@ if [[ "${SKIP_INSTALL}" != "true" ]]; then
     # Show current FDW configuration for debugging
     echo "Current FDW configuration:"
     psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-            SELECT srvname, srvoptions FROM pg_foreign_server WHERE srvname = 'index_pilot_target';
+            SELECT srvname, srvoptions FROM pg_foreign_server WHERE srvname = 'leandex_target';
         " 2>&1 || true
 
     echo "Attempting direct connection test:"
     psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-            SELECT index_pilot._connect_securely('${TARGET_DB}'::name);
+            SELECT leandex._connect_securely('${TARGET_DB}'::name);
         " 2>&1 || true
 
     exit 1
@@ -334,7 +334,7 @@ if [[ "${SKIP_INSTALL}" = "true" ]]; then
   # Also verify target database is registered and accessible
   echo "Verifying target database configuration..."
   if ! psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -X -d "${CONTROL_DB}" -c "
-        SELECT database_name FROM index_pilot.target_databases WHERE enabled = true LIMIT 1;
+        SELECT database_name FROM leandex.target_databases WHERE enabled = true LIMIT 1;
     " > /dev/null 2>&1; then
     echo -e "${YELLOW}WARNING: No target databases configured in control database${NC}" >&2
     echo "Non-superuser tests require target database to be registered."
@@ -381,7 +381,7 @@ else
 fi
 echo '<?xml version="1.0" encoding="UTF-8"?>' > "${JUNIT_FILE}"
 echo '<testsuites name="leandex" tests="0" failures="0" time="0">' >> "${JUNIT_FILE}"
-echo '  <testsuite name="index_pilot_tests">' >> "${JUNIT_FILE}"
+echo '  <testsuite name="leandex_tests">' >> "${JUNIT_FILE}"
 
 # Run each test
 START_TIME=$(date +%s)
@@ -406,14 +406,14 @@ for test_file in ${TEST_FILES}; do
       ((TESTS_PASSED++))
       TEST_END=$(date +%s)
       TEST_TIME=$((TEST_END - TEST_START))
-      echo "    <testcase name=\"${test_name}\" classname=\"index_pilot\" time=\"${TEST_TIME}\"/>" >> "${JUNIT_FILE}"
+      echo "    <testcase name=\"${test_name}\" classname=\"leandex\" time=\"${TEST_TIME}\"/>" >> "${JUNIT_FILE}"
     else
       ((TESTS_FAILED++))
       TEST_END=$(date +%s)
       TEST_TIME=$((TEST_END - TEST_START))
       ERROR_MSG=$(head -50 /tmp/test_output.log | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
       {
-        echo "    <testcase name=\"${test_name}\" classname=\"index_pilot\" time=\"${TEST_TIME}\">"
+        echo "    <testcase name=\"${test_name}\" classname=\"leandex\" time=\"${TEST_TIME}\">"
         echo "      <failure message=\"Test failed\">$ERROR_MSG</failure>"
         echo "    </testcase>"
       } >> "${JUNIT_FILE}"

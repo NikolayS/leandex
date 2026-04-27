@@ -43,7 +43,7 @@ This directory contains the automated test suite for leandex. The tests are desi
 ### Options
 - `-h HOST` - Database host (default: localhost)
 - `-p PORT` - Database port (default: 5432)
-- `-d DATABASE` - Database name (default: test_index_pilot)
+- `-d DATABASE` - Database name (default: test_leandex)
 - `-u USER` - Database user (default: postgres)
 - `-w PASSWORD` - Database password
 - `-i` - Install only, don't run tests
@@ -148,7 +148,7 @@ Current test coverage includes:
 ### Debug Mode
 ```bash
 # Run with verbose output
-PGPASSWORD=mypass psql -h localhost -U postgres -d test_index_pilot -f 01_basic_installation.sql
+PGPASSWORD=mypass psql -h localhost -U postgres -d test_leandex -f 01_basic_installation.sql
 ```
 
 ## Contributing

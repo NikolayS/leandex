@@ -14,8 +14,8 @@
 Enables self-contained operation without external schedulers. Available on most managed services. Optional - can trigger externally if unavailable.
 
 We support two deployment scenarios:
-- If pg_cron is not yet installed: install `pg_cron` in the control database (e.g., `index_pilot_control`). This keeps scheduling self-contained in the control DB.
-- If pg_cron is already installed in another database: keep it as is and schedule jobs from that database using `cron.schedule_in_database(...)` to run commands in `index_pilot_control`. Note that pg_cron may only be installed in one database per cluster; `cron.schedule_in_database` is the supported way to run jobs targeting other databases.
+- If pg_cron is not yet installed: install `pg_cron` in the control database (e.g., `leandex_control`). This keeps scheduling self-contained in the control DB.
+- If pg_cron is already installed in another database: keep it as is and schedule jobs from that database using `cron.schedule_in_database(...)` to run commands in `leandex_control`. Note that pg_cron may only be installed in one database per cluster; `cron.schedule_in_database` is the supported way to run jobs targeting other databases.
 
 ### `dblink` for separate connections
 `REINDEX INDEX CONCURRENTLY` cannot run in transaction blocks. `dblink` creates separate connection to execute reindex operations without blocking the control session.
@@ -24,28 +24,28 @@ We support two deployment scenarios:
 Uses `postgres_fdw` user mappings so dblink connects by server name instead of embedding plaintext passwords in dblink connection strings. Access to foreign servers and user mappings should be restricted to admin roles.
 
 ### Separate control database
-Prevents deadlocks during reindex operations. Control database (`index_pilot_control`) manages all tracking while target databases remain clean without any `leandex` installation.
+Prevents deadlocks during reindex operations. Control database (`leandex_control`) manages all tracking while target databases remain clean without any `leandex` installation.
 
 ## Architecture diagram
 
 ```mermaid
 graph TB
-    subgraph "Control Database (index_pilot_control)"
+    subgraph "Control Database (leandex_control)"
         PGC[pg_cron scheduler]
-        IPF[index_pilot functions]
+        IPF[leandex functions]
         FDW[postgres_fdw servers]
         HIST[reindex_history]
         STATE[index_latest_state]
     end
-    
+
     subgraph "Target Database 1"
         DB1[Tables & Indexes]
     end
-    
+
     subgraph "Target Database 2"
         DB2[Tables & Indexes]
     end
-    
+
     PGC -->|triggers| IPF
     IPF -->|secure connection| FDW
     FDW -->|dblink| DB1
@@ -60,7 +60,7 @@ graph TB
 
 Operator-controlled maintenance loop:
 
-1. Control database contains `index_pilot` schema and leandex functions
+1. Control database contains `leandex` schema and leandex functions
 2. `postgres_fdw` user mappings hold target credentials, avoiding plaintext dblink connection strings
 3. `dblink` executes `REINDEX INDEX CONCURRENTLY`
 4. Bloat detection using Maxim Boguk's formula

@@ -9,12 +9,12 @@ begin
   raise notice 'Installing leandex into control database "%".', current_database();
 end; $$;
 
-create schema index_pilot;
+create schema leandex;
 
 /*
  * Settings table
  */
-create table index_pilot.config (
+create table leandex.config (
   id bigserial primary key,
   datname name,
   schemaname name,
@@ -25,33 +25,33 @@ create table index_pilot.config (
   "comment" text
 );
 
-alter table index_pilot.config add constraint inherit_check1 check (
+alter table leandex.config add constraint inherit_check1 check (
   indexrelname is null
   or
     indexrelname is not null
     and relname is not null
 );
-alter table index_pilot.config add constraint inherit_check2 check (
+alter table leandex.config add constraint inherit_check2 check (
   relname is null
   or
     relname is not null
     and schemaname is not null
 );
-alter table index_pilot.config add constraint inherit_check3 check (
+alter table leandex.config add constraint inherit_check3 check (
   schemaname is null
   or
     schemaname is not null
     and datname is not null
 );
 
-create unique index config_u1 on index_pilot.config(key) where datname is null;
-create unique index config_u2 on index_pilot.config(key, datname) where schemaname is null;
-create unique index config_u3 on index_pilot.config(key, datname, schemaname) where relname is null;
-create unique index config_u4 on index_pilot.config(key, datname, schemaname, relname) where indexrelname is null;
-create unique index config_u5 on index_pilot.config(key, datname, schemaname, relname, indexrelname);
+create unique index config_u1 on leandex.config(key) where datname is null;
+create unique index config_u2 on leandex.config(key, datname) where schemaname is null;
+create unique index config_u3 on leandex.config(key, datname, schemaname) where relname is null;
+create unique index config_u4 on leandex.config(key, datname, schemaname, relname) where indexrelname is null;
+create unique index config_u5 on leandex.config(key, datname, schemaname, relname, indexrelname);
 
 -- Default "global" settings
-insert into index_pilot.config (
+insert into leandex.config (
   key,
   value,
   "comment"
@@ -74,7 +74,7 @@ insert into index_pilot.config (
 );
 
 -- Default database-level setting
-insert into index_pilot.config (
+insert into leandex.config (
   datname,
   schemaname,
   relname,
@@ -104,7 +104,7 @@ insert into index_pilot.config (
 /*
  * Databases to manage with leandex
  */
-create table index_pilot.target_databases (
+create table leandex.target_databases (
   id bigserial primary key,
   database_name name not null unique,
   host text not null default 'localhost',
@@ -120,7 +120,7 @@ create table index_pilot.target_databases (
 /*
  * History of REINDEX operations
  */
-create table index_pilot.reindex_history (
+create table leandex.reindex_history (
   id bigserial primary key,
   entry_timestamp timestamptz not null default now(),
   datid oid,
@@ -139,17 +139,17 @@ create table index_pilot.reindex_history (
   error_message text
 );
 
-create index reindex_history_oid_index on index_pilot.reindex_history(datid, indexrelid);
-create index reindex_history_index on index_pilot.reindex_history(datname, schemaname, relname, indexrelname);
-create index reindex_history_datname_index on index_pilot.reindex_history(datname);
-create index reindex_history_timestamp_index on index_pilot.reindex_history(entry_timestamp);
-create index reindex_history_status_index on index_pilot.reindex_history(status);
+create index reindex_history_oid_index on leandex.reindex_history(datid, indexrelid);
+create index reindex_history_index on leandex.reindex_history(datname, schemaname, relname, indexrelname);
+create index reindex_history_datname_index on leandex.reindex_history(datname);
+create index reindex_history_timestamp_index on leandex.reindex_history(entry_timestamp);
+create index reindex_history_status_index on leandex.reindex_history(status);
 
 
 /*
  * Latest state of indexes for bloat estimation
  */
-create table index_pilot.index_latest_state (
+create table leandex.index_latest_state (
   id bigserial primary key,
   mtime timestamptz not null default now(),
   datid oid not null,
@@ -164,17 +164,17 @@ create table index_pilot.index_latest_state (
   best_ratio real
 );
 
-create unique index index_latest_state_oid_index on index_pilot.index_latest_state(datid, indexrelid);
-create index index_latest_state_index on index_pilot.index_latest_state(datname, schemaname, relname, indexrelname);
-create index index_latest_state_datname_index on index_pilot.index_latest_state(datname);
-create index index_latest_state_datid_index on index_pilot.index_latest_state(datid);
-create index index_latest_state_indisvalid_index on index_pilot.index_latest_state(indisvalid);
+create unique index index_latest_state_oid_index on leandex.index_latest_state(datid, indexrelid);
+create index index_latest_state_index on leandex.index_latest_state(datname, schemaname, relname, indexrelname);
+create index index_latest_state_datname_index on leandex.index_latest_state(datname);
+create index index_latest_state_datid_index on leandex.index_latest_state(datid);
+create index index_latest_state_indisvalid_index on leandex.index_latest_state(indisvalid);
 
 
 /*
  * History view – formatted view of reindex history, better for human consumption
  */
-create view index_pilot.history as
+create view leandex.history as
   select date_trunc('second', entry_timestamp)::timestamp as ts,
     datname as db, -- Use datname for database identification
     schemaname as schema,
@@ -187,25 +187,25 @@ create view index_pilot.history as
     date_trunc('seconds', reindex_duration) as duration,
     status,
     left(error_message, 100) as error
-  from index_pilot.reindex_history order by id desc;
+  from leandex.reindex_history order by id desc;
 
 
 /*
  * Current version of table structure
  */
-create table index_pilot.tables_version (
+create table leandex.tables_version (
 	version smallint not null
 );
 
-create unique index tables_version_single_row on index_pilot.tables_version((version is not null));
+create unique index tables_version_single_row on leandex.tables_version((version is not null));
 
-insert into index_pilot.tables_version values(1);
+insert into leandex.tables_version values(1);
 
 
 /*
  * Current processed index; can be invalid
  */
-create table index_pilot.current_processed_index (
+create table leandex.current_processed_index (
   id bigserial primary key,
   mtime timestamptz not null default now(),
   datname name not null,

@@ -34,7 +34,7 @@ Environment:
 ### Defaults and prerequisites
 - Host: `localhost`; Port: `5432`.
 - User: current `$USER` by default.
-- Control DB: `index_pilot_control`.
+- Control DB: `leandex_control`.
 - Quiet flags: psql runs with `-X` by default; add `-q` for quieter output.
 - Required: `psql` must be available in PATH.
 
