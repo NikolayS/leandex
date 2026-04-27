@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  shell-lint:
+    name: shell lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shell tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck shfmt
+      - name: Check shell formatting
+        run: shfmt -i 2 -ci -bn -sr -d leandex index_pilot.sh test/run_tests.sh ci/e2e_bloat_reduction.sh
+      - name: Run shellcheck
+        run: shellcheck -x leandex index_pilot.sh test/run_tests.sh ci/e2e_bloat_reduction.sh
+
+  sql-security:
+    name: sql security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check SQL construction and secrets
+        run: |
+          set -euo pipefail
+          echo "Checking for suspicious dynamic SQL concatenation..."
+          if grep -E "EXECUTE[[:space:]]+[^;]*\|\|[[:space:]]*[^';]*\|\|" *.sql | grep -v "format\|quote_ident\|quote_literal"; then
+            echo "Potential SQL injection pattern found"
+            exit 1
+          fi
+          echo "Checking for hardcoded SQL passwords..."
+          if grep -E "(PASSWORD|IDENTIFIED BY)[[:space:]]*[=:][[:space:]]*'[^']+'" *.sql | grep -v "your_secure_password\|your_password\|changeme\|testpass"; then
+            echo "Hardcoded password found"
+            exit 1
+          fi
+
+  tests:
+    name: postgres ${{ matrix.pg }} tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['13', '14', '15', '16', '17', '18']
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install client tools
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Run SQL test suite
+        env:
+          PGPASSWORD: postgres
+        run: |
+          chmod +x test/run_tests.sh
+          ./test/run_tests.sh -h 127.0.0.1 -p 5432 -u postgres -w postgres -d test_index_pilot
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-pg-${{ matrix.pg }}
+          path: test/test-results.xml
+
+  installer:
+    name: installer postgres ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['16', '17', '18']
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install client tools
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Install, register target, verify
+        env:
+          PGPASSWORD: postgres
+        run: |
+          chmod +x leandex
+          ./leandex install-control -H 127.0.0.1 -P 5432 -U postgres -C index_pilot_control_ci
+          ./leandex register-target -H 127.0.0.1 -P 5432 -U postgres -C index_pilot_control_ci -T postgres --server-name target_postgres --fdw-host 127.0.0.1 --force
+          ./leandex verify -H 127.0.0.1 -P 5432 -U postgres -C index_pilot_control_ci | tee /tmp/verify.txt
+          grep -q "registered targets|t|postgres" /tmp/verify.txt
+
+  e2e-bloat-reduction:
+    name: postgres 18 e2e bloat reduction
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install client tools
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Run bloat reduction scenario
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASS: postgres
+          PGPASSWORD: postgres
+        run: |
+          chmod +x ci/e2e_bloat_reduction.sh
+          ci/e2e_bloat_reduction.sh
