@@ -43,10 +43,10 @@ begin
 
   -- Create test schema and tables in target database
   perform dblink(_target_db, '
-    create schema if not exists test_pilot;
+    create schema if not exists test_leandex_app;
 
-    drop table if exists test_pilot.test_table cascade;
-    create table test_pilot.test_table (
+    drop table if exists test_leandex_app.test_table cascade;
+    create table test_leandex_app.test_table (
       id serial primary key,
       email VARCHAR(255),
       status VARCHAR(50),
@@ -54,19 +54,19 @@ begin
       created_at timestamp default NOW()
     );
 
-    insert into test_pilot.test_table (email, status, data)
+    insert into test_leandex_app.test_table (email, status, data)
     select
       ''user'' || i || ''@test.com'',
       case when i % 3 = 0 then ''active'' else ''inactive'' end,
       jsonb_build_object(''id'', i, ''value'', random() * 100)
     from generate_series(1, 1000) i;
 
-    create index idx_test_email on test_pilot.test_table(email);
-    create index idx_test_status on test_pilot.test_table(status);
-    create index idx_test_created on test_pilot.test_table(created_at);
-    create index idx_test_data_gin on test_pilot.test_table using gin(data);
+    create index idx_test_email on test_leandex_app.test_table(email);
+    create index idx_test_status on test_leandex_app.test_table(status);
+    create index idx_test_created on test_leandex_app.test_table(created_at);
+    create index idx_test_data_gin on test_leandex_app.test_table using gin(data);
 
-    analyze test_pilot.test_table;
+    analyze test_leandex_app.test_table;
   ');
 
   raise notice 'PASS: Test schema and tables created in target database';
@@ -96,7 +96,7 @@ begin
   -- Verify indexes were detected
   select count(*) into _count
   from leandex.index_latest_state
-  where schemaname = 'test_pilot';
+  where schemaname = 'test_leandex_app';
 
   if _count < 4 then
     raise exception 'FAIL: Expected at least 4 indexes, found %', _count;
@@ -110,7 +110,7 @@ begin
   -- Force populate should work if we got this far
   perform leandex.do_force_populate_index_stats(
     (select database_name from leandex.target_databases where enabled = true limit 1),
-    'test_pilot',
+    'test_leandex_app',
     null,
     null
   );
@@ -126,7 +126,7 @@ declare
 begin
   select count(*) into _count
   from leandex.index_latest_state
-  where schemaname = 'test_pilot'
+  where schemaname = 'test_leandex_app'
   and best_ratio is not null;
 
   if _count < 1 then
@@ -144,9 +144,9 @@ begin
   perform dblink(
     (select database_name from leandex.target_databases where enabled = true limit 1),
     '
-    delete from test_pilot.test_table where id % 3 = 0;
-    update test_pilot.test_table set status = ''updated'' where id % 5 = 0;
-    analyze test_pilot.test_table;
+    delete from test_leandex_app.test_table where id % 3 = 0;
+    update test_leandex_app.test_table set status = ''updated'' where id % 5 = 0;
+    analyze test_leandex_app.test_table;
     '
   );
 
@@ -158,7 +158,7 @@ begin
   from leandex.get_index_bloat_estimates(
     (select database_name from leandex.target_databases where enabled = true limit 1)
   )
-  where schemaname = 'test_pilot'
+  where schemaname = 'test_leandex_app'
   and estimated_bloat is not null;
 
   if _count < 1 then
@@ -183,7 +183,7 @@ begin
   from leandex.get_index_bloat_estimates(
     (select database_name from leandex.target_databases where enabled = true limit 1)
   )
-  where schemaname = 'test_pilot';
+  where schemaname = 'test_leandex_app';
 
   raise notice 'PASS: Bloat detection working (max bloat: %, threshold: %)',
     coalesce(_max_bloat, 0), _threshold;
@@ -195,12 +195,12 @@ begin
   -- Clean up target database
   perform dblink(
     (select database_name from leandex.target_databases where enabled = true limit 1),
-    'drop schema if exists test_pilot cascade;'
+    'drop schema if exists test_leandex_app cascade;'
   );
 
   -- Clean up control database tracking tables
-  delete from leandex.index_latest_state where schemaname = 'test_pilot';
-  delete from leandex.reindex_history where schemaname = 'test_pilot';
+  delete from leandex.index_latest_state where schemaname = 'test_leandex_app';
+  delete from leandex.reindex_history where schemaname = 'test_leandex_app';
   raise notice 'PASS: Test cleanup completed';
 end $$;
 

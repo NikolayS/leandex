@@ -94,7 +94,7 @@ call leandex.do_reindex('<db>', '<schema>', '<table>', '<index>', false);  -- se
 
 ### Security
 
-- **How are credentials stored?** - In `postgres_fdw` user mappings (catalog-managed), not in plain text.
+- **How are credentials stored?** - In `postgres_fdw` user mappings, not embedded in dblink connection strings. Restrict access to foreign servers and user mappings.
 
 - **How do I verify FDW security status?** - Run the check.
 ```sql
@@ -118,7 +118,7 @@ values ('<target_db_name>', '<target_host>', 5432, 'target_<target_db_name>');
 ```sql
 select cron.schedule_in_database(
   'leandex_daily', '0 2 * * *',
-  'select leandex.periodic(real_run := true);',
+  'call leandex.periodic(real_run := true);',
   '<leandex_control_db>'
 );
 ```

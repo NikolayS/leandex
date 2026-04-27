@@ -39,9 +39,10 @@ psql -h <host> -U <admin_user> -d leandex_control -f leandex_fdw.sql
 # Note: at this step you may see a WARNING from the internal permissions self-check.
 # It is expected before FDW self-connection is configured.
 
-# 4) Configure secure FDW self-connection (password stored in PG catalog)
-psql -h <host> -U <admin_user> -d leandex_control \
-  -c "select leandex.setup_connection('<host>', 5432, '<user>', '<password>');"
+# 4) Register a target using the CLI so FDW server and user mapping are created consistently
+PGPASSWORD='<password>' ./leandex register-target \
+  -H <host> -U <admin_user> -C leandex_control \
+  -T <target_db> --fdw-host <target_host>
 
 # 5) Verify environment
 psql -h <host> -U <admin_user> -d leandex_control -c "select * from leandex.check_permissions();"

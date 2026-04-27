@@ -398,9 +398,9 @@ begin
             and ((c.relkind = any (array['r'::"char", 'm'::"char"])) or ((c.relkind = 't'::"char") and %s))
             -- ignore exclusion constraints
             and not exists (select from pg_constraint where pg_constraint.conindid = i.oid and pg_constraint.contype = 'x')
-            -- ignore indexes for system tables and leandex own tables
-            and n.nspname not in ('pg_catalog', 'information_schema', 'leandex')
-            -- ignore indexes on TOAST tables of system tables and leandex own tables
+            -- ignore indexes for system tables
+            and n.nspname not in ('pg_catalog', 'information_schema')
+            -- ignore indexes on TOAST tables of system tables
             and (n1.nspname is null or n1.nspname not in ('pg_catalog', 'information_schema', 'leandex'))
             -- skip BRIN indexes... please see BUG #17205 https://www.postgresql.org/message-id/flat/17205-42b1d8f131f0cf97%%40postgresql.org
             and a.amname not in ('brin') and x.indislive
@@ -661,9 +661,9 @@ begin
           and ((c.relkind = any (array['r'::"char", 'm'::"char"])) or ((c.relkind = 't'::"char") and %s))
           -- ignore exclusion constraints
           and not exists (select from pg_constraint where pg_constraint.conindid = i.oid and pg_constraint.contype = 'x')
-          -- ignore indexes for system tables and leandex own tables
-          and n.nspname not in ('pg_catalog', 'information_schema', 'leandex')
-          -- ignore indexes on TOAST tables of system tables and leandex own tables
+          -- ignore indexes for system tables
+          and n.nspname not in ('pg_catalog', 'information_schema')
+          -- ignore indexes on TOAST tables of system tables
           and (n1.nspname is null or n1.nspname not in ('pg_catalog', 'information_schema', 'leandex'))
           -- skip BRIN indexes... please see BUG #17205 https://www.postgresql.org/message-id/flat/17205-42b1d8f131f0cf97%%40postgresql.org
           and a.amname not in ('brin') and x.indislive
@@ -1114,6 +1114,17 @@ begin
       -- Perform REINDEX synchronously for robust and predictable operation
       -- Synchronous execution enables immediate status updates and simplifies process management
       begin
+        -- Apply remote timeout settings before REINDEX. These are session-level
+        -- settings on the dblink connection, not local control-DB settings.
+        perform dblink_exec(
+          _index.datname,
+          format('set lock_timeout = %L', leandex.get_setting(_index.datname, _index.schemaname, _index.relname, _index.indexrelname, 'lock_timeout'))
+        );
+        perform dblink_exec(
+          _index.datname,
+          format('set statement_timeout = %L', leandex.get_setting(_index.datname, _index.schemaname, _index.relname, _index.indexrelname, 'statement_timeout'))
+        );
+
         -- Run REINDEX INDEX CONCURRENTLY synchronously
         perform dblink_exec(
           _index.datname,
@@ -1284,14 +1295,14 @@ begin
             join pg_catalog.pg_class as i on i.oid = x.indexrelid
             join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
             where
-              n.nspname = '%1$s'
-              and c.relname = '%2$s'
-              and i.relname = '%3$s_ccnew'
+              n.nspname = %1$L
+              and c.relname = %2$L
+              and i.relname = %3$L
               and not x.indisvalid
           $sql$,
           _index.schemaname,
           _index.relname,
-          _index.indexrelname
+          _index.indexrelname || '_ccnew'
         )
       ) as _res(indexrelid oid))
     then
@@ -1306,9 +1317,9 @@ begin
               join pg_catalog.pg_class as i on i.oid = x.indexrelid
               join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
               where
-                n.nspname = '%1$s'
-                and c.relname = '%2$s'
-                and i.relname = '%3$s'
+                n.nspname = %1$L
+                and c.relname = %2$L
+                and i.relname = %3$L
             $sql$,
             _index.schemaname,
             _index.relname,

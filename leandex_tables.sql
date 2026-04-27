@@ -71,6 +71,14 @@ insert into leandex.config (
   'reindex_history_retention_period',
   '10 years',
   'default retention period for reindex history'
+), (
+  'lock_timeout',
+  '5s',
+  'remote lock_timeout applied before reindex'
+), (
+  'statement_timeout',
+  '0',
+  'remote statement_timeout applied before reindex; 0 disables it'
 );
 
 -- Default database-level setting

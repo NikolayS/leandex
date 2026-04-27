@@ -211,16 +211,18 @@ where i.relname ~ '_ccnew[0-9]*$' and not idx.indisvalid;
 ```
 
 ### FDW connection or authentication failures
-```sql
--- Re-run secure setup
-select * from leandex.setup_fdw_complete(
-  _password => '<password>',
-  _host     => '<target_host>',
-  _port     => 5432,
-  _username => 'leandex'
-);
 
--- Re-check status
+Re-register the target with the CLI so the FDW server, user mapping, and inventory row are recreated consistently:
+
+```bash
+PGPASSWORD='<password>' ./leandex register-target \
+  -H <control_host> -U <admin_user> -C <leandex_control_db> \
+  -T <target_db> --fdw-host <target_host> --force
+```
+
+Then re-check status:
+
+```sql
 select * from leandex.check_fdw_security_status();
 ```
 

@@ -33,7 +33,7 @@ begin
   end if;
 
   -- Use ONLY postgres_fdw with user mapping (secure approach)
-  -- Password is stored securely in PostgreSQL catalog, not in plain text
+  -- Password is stored in a postgres_fdw user mapping, not embedded in a dblink connection string
   declare
     _fdw_server_name text;
   begin

@@ -178,6 +178,29 @@ psql_file() {
 }
 
 ##
+# Description: Execute SQL via a temporary 0600 file so secrets are not exposed in argv.
+# Globals: QUIET_ARGS, DB_HOST, DB_PORT, DB_USER
+# Args: $1 database name; $2 SQL text; $@ optional extra psql args
+# Outputs: psql output to STDOUT/STDERR
+# Returns: psql's exit status
+psql_script() {
+  local db="$1"
+  shift
+  local sql="$1"
+  shift
+  local tmp
+  tmp="$(mktemp)"
+  chmod 600 "${tmp}"
+  printf '%s\n' "${sql}" > "${tmp}"
+  set +e
+  psql "${QUIET_ARGS[@]}" -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${db}" "$@" -v ON_ERROR_STOP=on -At -f "${tmp}"
+  local status=$?
+  set -e
+  rm -f "${tmp}"
+  return "${status}"
+}
+
+##
 # Description: Create control database if it does not exist and allowed.
 # Globals: CREATE_DB, CONTROL_DB
 # Args: none
@@ -188,10 +211,10 @@ ensure_control_db() {
     return 0
   fi
   local exists
-  exists=$(psql_cmd postgres "select 1 from pg_database where datname = '${CONTROL_DB}'") || true
+  exists=$(psql_script postgres "select 1 from pg_database where datname = :'control_db';" -v "control_db=${CONTROL_DB}") || true
   if [[ -z "${exists}" ]]; then
     print_info "Creating control database ${CONTROL_DB}"
-    psql_cmd postgres "create database ${CONTROL_DB};"
+    psql_script postgres 'create database :"control_db";' -v "control_db=${CONTROL_DB}"
     print_ok "Control database created: ${CONTROL_DB}"
   else
     print_ok "Control database exists: ${CONTROL_DB}"
@@ -303,36 +326,41 @@ register_target() {
 
   print_info "Configuring FDW server '${server}' to ${fdw_host}:${DB_PORT} dbname=${TARGET_DB}"
   # Ensure current user has FDW usage (useful on managed services)
-  psql_cmd "${CONTROL_DB}" "grant usage on foreign data wrapper postgres_fdw to \"${DB_USER}\";" || true
+  psql_script "${CONTROL_DB}" 'grant usage on foreign data wrapper postgres_fdw to :"db_user";' -v "db_user=${DB_USER}" || true
   if [[ "${FORCE}" == true ]]; then
-    psql_cmd "${CONTROL_DB}" "drop server if exists ${server} cascade;" || true
+    psql_script "${CONTROL_DB}" 'drop server if exists :"server" cascade;' -v "server=${server}" || true
   fi
 
-  # Create or replace server
-  psql_cmd "${CONTROL_DB}" "do \$\$ begin
-    if exists (select 1 from pg_foreign_server where srvname = '${server}') then
-      perform 1; -- exists, keep as-is
-    else
-      execute format('create server %I foreign data wrapper postgres_fdw options (host %L, port %L, dbname %L)', '${server}', '${fdw_host}', '${DB_PORT}', '${TARGET_DB}');
-    end if;
-  end \$\$;"
+  # Create server if needed
+  psql_script "${CONTROL_DB}" "create server if not exists :\"server\" foreign data wrapper postgres_fdw options (host :'fdw_host', port :'db_port', dbname :'target_db');" \
+    -v "server=${server}" \
+    -v "fdw_host=${fdw_host}" \
+    -v "db_port=${DB_PORT}" \
+    -v "target_db=${TARGET_DB}"
 
   # Upsert into target_databases
-  psql_cmd "${CONTROL_DB}" "insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
-    values ('${TARGET_DB}', '${fdw_host}', ${DB_PORT}, '${server}', true)
-    on conflict (database_name) do update set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;"
+  psql_script "${CONTROL_DB}" "insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
+    values (:'target_db', :'fdw_host', :'db_port'::integer, :'server', true)
+    on conflict (database_name) do update set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;" \
+    -v "target_db=${TARGET_DB}" \
+    -v "fdw_host=${fdw_host}" \
+    -v "db_port=${DB_PORT}" \
+    -v "server=${server}"
 
   # User mapping for current_user (managed-services friendly)
   if [[ -n "${DB_PASS}" ]]; then
     print_info "Ensuring user mapping for current_user on server ${server}"
-    psql_cmd "${CONTROL_DB}" "drop user mapping if exists for current_user server ${server};" || true
-    psql_cmd "${CONTROL_DB}" "create user mapping for current_user server ${server} options (user '${DB_USER}', password '${DB_PASS}');" || true
+    psql_script "${CONTROL_DB}" 'drop user mapping if exists for current_user server :"server";' -v "server=${server}" || true
+    psql_script "${CONTROL_DB}" "create user mapping for current_user server :\"server\" options (user :'db_user', password :'db_pass');" \
+      -v "server=${server}" \
+      -v "db_user=${DB_USER}" \
+      -v "db_pass=${DB_PASS}" || true
   else
     print_info "Skipping user mapping password setup (PGPASSWORD not set)"
   fi
 
   print_info "Testing secure FDW connection via internal helper"
-  if psql_cmd "${CONTROL_DB}" "select leandex._connect_securely('${TARGET_DB}'::name);" > /dev/null 2>&1; then
+  if psql_script "${CONTROL_DB}" "select leandex._connect_securely(:'target_db'::name);" -v "target_db=${TARGET_DB}" > /dev/null 2>&1; then
     print_ok "FDW connection OK for target database '${TARGET_DB}'"
   else
     print_err "FDW connection test failed. Verify user mapping and network access."
@@ -409,12 +437,9 @@ uninstall_all() {
     print_err "Password is required for uninstall. Provide -W or set PGPASSWORD."
     exit 1
   fi
-  print_info "Running uninstall in ${CONTROL_DB}"
-  psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/uninstall.sql"
-
   if [[ "${DROP_SERVERS}" == true ]]; then
     print_info "Dropping FDW servers referenced by leandex.target_databases (best effort)"
-    psql_cmd "${CONTROL_DB}" "do \$\$ declare r record; begin
+    psql_script "${CONTROL_DB}" "do \$\$ declare r record; begin
       for r in select fdw_server_name from leandex.target_databases loop
         begin
           execute format('drop server if exists %I cascade', r.fdw_server_name);
@@ -422,12 +447,14 @@ uninstall_all() {
           perform 1;
         end;
       end loop;
-    exception when undefined_table then
+    exception when undefined_table or invalid_schema_name then
       perform 1;
     end \$\$;" || true
     print_ok "FDW servers drop attempted"
   fi
 
+  print_info "Running uninstall in ${CONTROL_DB}"
+  psql_file "${CONTROL_DB}" "${SCRIPT_DIR}/uninstall.sql"
   print_ok "Uninstall complete"
 }
 

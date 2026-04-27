@@ -1,28 +1,17 @@
 -- leandex Uninstall Script
--- This script completely removes leandex from your database
--- WARNING: This will delete all collected statistics and history!
+-- This script removes the leandex schema from the control database.
+-- WARNING: This deletes all collected statistics and history.
+--
+-- It intentionally does NOT drop postgres_fdw servers or user mappings.
+-- Use `./leandex uninstall --drop-servers` if you also want to drop FDW servers
+-- registered in leandex.target_databases.
 
--- 1. Drop all FDW servers registered in leandex.target_databases
-do $$
-declare r record;
-begin
-  for r in select distinct fdw_server_name from leandex.target_databases loop
-    begin
-      execute format('drop server if exists %I cascade', r.fdw_server_name);
-    exception when others then
-      perform 1;
-    end;
-  end loop;
-exception when undefined_table then
-  perform 1;
-end $$;
-
--- 2. Drop the schema cascade (this removes all objects)
+-- 1. Drop the schema cascade (this removes all leandex objects)
 drop schema if exists leandex cascade;
 
--- 3. Note about invalid indexes
--- Invalid _ccnew* indexes might exist from failed reindex operations
--- These could be from leandex or from manual operations
+-- 2. Note about invalid indexes
+-- Invalid _ccnew* indexes might exist from failed reindex operations.
+-- These could be from leandex or from manual operations.
 -- To list them (but NOT automatically drop):
 do $$
 declare
@@ -48,6 +37,6 @@ begin
   end if;
 end $$;
 
--- Note: postgres_fdw extension is not removed as it may be used by other applications
--- If you want to remove it and it's not used elsewhere, run:
+-- Note: postgres_fdw extension is not removed as it may be used by other applications.
+-- If you want to remove it and it is not used elsewhere, run:
 -- drop extension postgres_fdw cascade;
