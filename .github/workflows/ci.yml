@@ -14,9 +14,9 @@ jobs:
       - name: Install shell tools
         run: sudo apt-get update && sudo apt-get install -y shellcheck shfmt
       - name: Check shell formatting
-        run: shfmt -i 2 -ci -bn -sr -d leandex leandex.sh test/run_tests.sh ci/e2e_bloat_reduction.sh
+        run: shfmt -i 2 -ci -bn -sr -d leandex test/run_tests.sh ci/e2e_bloat_reduction.sh
       - name: Run shellcheck
-        run: shellcheck -x leandex leandex.sh test/run_tests.sh ci/e2e_bloat_reduction.sh
+        run: shellcheck -x leandex test/run_tests.sh ci/e2e_bloat_reduction.sh
 
   sql-security:
     name: sql security scan

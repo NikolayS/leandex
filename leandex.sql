@@ -1866,7 +1866,7 @@ begin
       when exists (select from leandex.target_databases) then 'YES'
       else 'NO'
     end::text,
-    'Register targets: (SQL) create server + user mapping + insert into leandex.target_databases; or use leandex.sh register-target'::text;
+    'Register targets: (SQL) create server + user mapping + insert into leandex.target_databases; or use ./leandex register-target'::text;
 
   -- Check user mapping for current user on at least one target server
   return query select

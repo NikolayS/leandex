@@ -210,7 +210,6 @@ PGPASSWORD='your_password' psql \
 .
 ├── leandex                     # installer / admin CLI
 ├── leandex.sql                 # single-file SQL installer
-├── leandex.sh              # compatibility wrapper
 ├── leandex_tables.sql      # split SQL: schema and tables
 ├── leandex_functions.sql   # split SQL: core logic
 ├── leandex_fdw.sql         # split SQL: FDW/dblink helpers
