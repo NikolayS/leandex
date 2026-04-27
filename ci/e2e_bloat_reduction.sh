@@ -12,6 +12,7 @@ DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-test_leandex}"
 DB_USER="${POSTGRES_USER:-${DB_USER:-postgres}}"
 DB_PASS="${POSTGRES_PASSWORD:-${DB_PASS:-postgres}}"
+FDW_HOST="${FDW_HOST:-${DB_HOST}}"
 
 CONTROL_DB="${DB_NAME}_control"
 TARGET_DB="${DB_NAME}"
@@ -69,10 +70,10 @@ else
   psql_f "${CONTROL_DB}" "${REPO_DIR}/leandex_fdw.sql"
 fi
 
-echo "Setting up FDW server and registration (self-host 127.0.0.1)"
+echo "Setting up FDW server and registration (FDW host ${FDW_HOST})"
 psql_c "${CONTROL_DB}" "drop server if exists leandex_target cascade;"
-psql_c "${CONTROL_DB}" "create server leandex_target foreign data wrapper postgres_fdw options (host '127.0.0.1', port '${DB_PORT}', dbname '${TARGET_DB}');"
-psql_c "${CONTROL_DB}" "insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled) values ('${TARGET_DB}', '127.0.0.1', ${DB_PORT}, 'leandex_target', true) on conflict (database_name) do update set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;"
+psql_c "${CONTROL_DB}" "create server leandex_target foreign data wrapper postgres_fdw options (host '${FDW_HOST}', port '${DB_PORT}', dbname '${TARGET_DB}');"
+psql_c "${CONTROL_DB}" "insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled) values ('${TARGET_DB}', '${FDW_HOST}', ${DB_PORT}, 'leandex_target', true) on conflict (database_name) do update set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;"
 psql_c "${CONTROL_DB}" "drop user mapping if exists for \"${DB_USER}\" server leandex_target;"
 psql_c "${CONTROL_DB}" "create user mapping for \"${DB_USER}\" server leandex_target options (user '${DB_USER}', password '${DB_PASS}');"
 

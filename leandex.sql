@@ -1570,8 +1570,8 @@ begin
       end if;
 
       -- Drop the invalid _ccnew index
-      perform dblink(_index.datname, format('drop index concurrently %I.%I_ccnew',
-        _index.schemaname, _index.indexrelname));
+      perform dblink(_index.datname, format('drop index concurrently %I.%I',
+        _index.schemaname, _index.indexrelname || '_ccnew'));
 
       -- Log the drop
       raise warning 'The invalid index %.%_ccnew was dropped in database %',

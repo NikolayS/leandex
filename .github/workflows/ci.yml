@@ -81,60 +81,82 @@ jobs:
       fail-fast: false
       matrix:
         pg: ['13', '14', '15', '16', '17', '18']
-    services:
-      postgres:
-        image: postgres:${{ matrix.pg }}-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
-      - name: Install client tools
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-      - name: Install, register target, verify
-        env:
-          PGPASSWORD: postgres
+      - name: Install, register target, verify over Docker network
         run: |
-          chmod +x leandex
-          ./leandex install-control -H 127.0.0.1 -P 5432 -U postgres -C leandex_control_ci
-          ./leandex register-target -H 127.0.0.1 -P 5432 -U postgres -C leandex_control_ci -T postgres --server-name target_postgres --fdw-host 127.0.0.1 --force
-          ./leandex verify -H 127.0.0.1 -P 5432 -U postgres -C leandex_control_ci | tee /tmp/verify.txt
-          grep -q "registered targets|t|postgres" /tmp/verify.txt
+          set -euo pipefail
+          net="leandex-installer-${{ matrix.pg }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          pg="leandex-installer-pg-${{ matrix.pg }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker network create "$net"
+          cleanup() {
+            docker rm -f "$pg" >/dev/null 2>&1 || true
+            docker network rm "$net" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run -d --name "$pg" --network "$net" --network-alias postgres \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+            postgres:${{ matrix.pg }}-alpine
+          for i in $(seq 1 60); do
+            if docker run --rm --network "$net" -e PGPASSWORD=postgres postgres:${{ matrix.pg }}-alpine \
+              pg_isready -h postgres -p 5432 -U postgres >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+            if [ "$i" -eq 60 ]; then
+              docker logs "$pg"
+              exit 1
+            fi
+          done
+          docker run --rm --network "$net" -v "$PWD:/work" -w /work \
+            -e PGPASSWORD=postgres \
+            postgres:${{ matrix.pg }}-alpine sh -lc '
+              apk add --no-cache bash >/dev/null
+              ./leandex install-control -H postgres -P 5432 -U postgres -C leandex_control_ci
+              ./leandex register-target -H postgres -P 5432 -U postgres -C leandex_control_ci -T postgres --server-name target_postgres --fdw-host postgres --force
+              ./leandex verify -H postgres -P 5432 -U postgres -C leandex_control_ci | tee /tmp/verify.txt
+              grep -q "registered targets|t|postgres" /tmp/verify.txt
+            '
 
   e2e-bloat-reduction:
     name: postgres 18 e2e bloat reduction
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
-      - name: Install client tools
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-      - name: Run bloat reduction scenario
-        env:
-          DB_HOST: 127.0.0.1
-          DB_PORT: 5432
-          DB_USER: postgres
-          DB_PASS: postgres
-          PGPASSWORD: postgres
+      - name: Run bloat reduction scenario over Docker network
         run: |
-          chmod +x ci/e2e_bloat_reduction.sh
-          ci/e2e_bloat_reduction.sh
+          set -euo pipefail
+          net="leandex-e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          pg="leandex-e2e-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker network create "$net"
+          cleanup() {
+            docker rm -f "$pg" >/dev/null 2>&1 || true
+            docker network rm "$net" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run -d --name "$pg" --network "$net" --network-alias postgres \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+            postgres:18-alpine
+          for i in $(seq 1 60); do
+            if docker run --rm --network "$net" -e PGPASSWORD=postgres postgres:18-alpine \
+              pg_isready -h postgres -p 5432 -U postgres >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+            if [ "$i" -eq 60 ]; then
+              docker logs "$pg"
+              exit 1
+            fi
+          done
+          docker run --rm --network "$net" -v "$PWD:/work" -w /work \
+            -e DB_HOST=postgres \
+            -e FDW_HOST=postgres \
+            -e DB_PORT=5432 \
+            -e DB_USER=postgres \
+            -e DB_PASS=postgres \
+            -e PGPASSWORD=postgres \
+            postgres:18-alpine sh -lc '
+              apk add --no-cache bash >/dev/null
+              chmod +x ci/e2e_bloat_reduction.sh
+              ci/e2e_bloat_reduction.sh
+            '
