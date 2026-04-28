@@ -95,7 +95,6 @@ function leandex.set_or_replace_setting(
 Common guardrail keys:
 
 - `allowed_start_windows` — JSON array of start windows. Gate only at start; a reindex already running may finish.
-- `blackout_start_windows` — JSON array of windows where new reindexes must not start.
 - `min_window_remaining` — interval; reject starts too close to the end of an allowed window.
 - `max_parallel_reindexes` — default `1`; blocks concurrent starters per target DB.
 - `respect_external_index_activity` — default `true`; skip while other index builds/reindexes are active.

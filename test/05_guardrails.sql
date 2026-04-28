@@ -48,6 +48,15 @@ begin
       created_at timestamptz not null default now()
     );
 
+    create table test_guardrails.unrelated_snapshot_holder (
+      id integer primary key,
+      payload text not null
+    );
+
+    insert into test_guardrails.unrelated_snapshot_holder
+    select g, md5(g::text)
+    from generate_series(1, 100) as g;
+
     insert into test_guardrails.guard_table (email, status, payload)
     select
       'user' || g || '@example.com',
@@ -416,16 +425,14 @@ declare
   _target_db text := test_guardrails_target_db();
   _reason text;
 begin
-  perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'lock_timeout', '200ms', 'test short timeout');
+  perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'lock_timeout', '30s', 'test default timeout');
   if 'blocker' = any(coalesce(dblink_get_connections(), array[]::text[])) then
     perform dblink_disconnect('blocker');
   end if;
   perform dblink_connect('blocker', 'leandex_target');
   perform dblink_exec('blocker', 'begin isolation level repeatable read');
-  perform dblink_exec('blocker', 'set local enable_seqscan = off');
   perform count
-  from dblink('blocker', 'select count(*) from test_guardrails.guard_table where email >= ''user1@example.com''') as t(count bigint);
-  perform pg_sleep(0.3);
+  from dblink('blocker', 'select count(*) from test_guardrails.unrelated_snapshot_holder') as t(count bigint);
 
   select blocker_reason into _reason
   from leandex._detect_reindex_blockers(_target_db::name, 'test_guardrails', 'guard_table', 'idx_guardrails_email')
@@ -434,11 +441,11 @@ begin
   perform dblink_exec('blocker', 'rollback');
   perform dblink_disconnect('blocker');
 
-  if coalesce(_reason, '') not like 'blocking transaction%' then
-    raise exception 'FAIL: old snapshot not detected as blocking transaction: %', _reason;
+  if coalesce(_reason, '') not like 'old snapshot:%' then
+    raise exception 'FAIL: unrelated old snapshot not detected: %', _reason;
   end if;
 
-  raise notice 'PASS: old snapshot guard catches REINDEX CONCURRENTLY wait risk';
+  raise notice 'PASS: unrelated old snapshot guard catches REINDEX CONCURRENTLY wait risk';
 end $$;
 
 -- 9b. Cleanup should not delete live current_processed_index rows.

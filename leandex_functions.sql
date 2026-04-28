@@ -1202,18 +1202,13 @@ create function leandex._evaluate_reindex_start(
 $body$
 declare
   _allowed_windows jsonb;
-  _blackout_windows jsonb;
   _allowed_end timestamptz;
-  _blackout_end timestamptz;
   _min_window_remaining interval := coalesce(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'min_window_remaining'), '0')::interval;
 begin
   if nullif(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'allowed_start_windows'), '') is not null then
     _allowed_windows := leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'allowed_start_windows')::jsonb;
   end if;
 
-  if nullif(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'blackout_start_windows'), '') is not null then
-    _blackout_windows := leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'blackout_start_windows')::jsonb;
-  end if;
 
   if _allowed_windows is not null then
     _allowed_end := leandex._matching_window_end(_allowed_windows, current_timestamp);
@@ -1231,14 +1226,6 @@ begin
 
     return query select true, null::text, _allowed_end - current_timestamp;
     return;
-  end if;
-
-  if _blackout_windows is not null then
-    _blackout_end := leandex._matching_window_end(_blackout_windows, current_timestamp);
-    if _blackout_end is not null then
-      return query select false, 'inside blackout start window', _blackout_end - current_timestamp;
-      return;
-    end if;
   end if;
 
   return query select true, null::text, null::interval;
@@ -1470,6 +1457,33 @@ begin
   select reason into _reason
   from dblink(
     _datname,
+    $sql$
+      select format(
+        'old snapshot: pid=%s age=%s backend_xmin=%s app=%s state=%s',
+        a.pid,
+        clock_timestamp() - a.xact_start,
+        a.backend_xmin,
+        coalesce(a.application_name, '<unknown>'),
+        a.state
+      ) as reason
+      from pg_stat_activity as a
+      where a.datname = current_database()
+        and a.pid <> pg_backend_pid()
+        and a.backend_xmin is not null
+        and coalesce(a.application_name, '') not like 'leandex:%'
+      order by a.xact_start nulls last, a.backend_start
+      limit 1
+    $sql$
+  ) as t(reason text);
+
+  if _reason is not null then
+    return query select _reason;
+    return;
+  end if;
+
+  select reason into _reason
+  from dblink(
+    _datname,
     format(
       $sql$
         select format(
@@ -1490,22 +1504,12 @@ begin
           and coalesce(a.application_name, '') not like 'leandex:%%'
           and n.nspname = %2$L
           and c.relname in (%3$L, %4$L)
-          and (
-            l.mode in (
-              'ShareUpdateExclusiveLock',
-              'ShareLock',
-              'ShareRowExclusiveLock',
-              'ExclusiveLock',
-              'AccessExclusiveLock'
-            )
-            or (
-              a.backend_xmin is not null
-              and l.mode in (
-                'AccessShareLock',
-                'RowShareLock',
-                'RowExclusiveLock'
-              )
-            )
+          and l.mode in (
+            'ShareUpdateExclusiveLock',
+            'ShareLock',
+            'ShareRowExclusiveLock',
+            'ExclusiveLock',
+            'AccessExclusiveLock'
           )
         order by a.xact_start
         limit 1

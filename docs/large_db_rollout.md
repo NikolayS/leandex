@@ -111,6 +111,7 @@ Keep these unless production evidence says otherwise:
 - `min_window_remaining not satisfied` — good; it saved you from starting too late.
 - `external index activity: ...` — some other job is already doing index work. Back off.
 - `max_parallel_reindexes reached` — intentional throttle, not a bug.
+- `old snapshot: ...` — a backend has a snapshot that can stall `reindex index concurrently`; let it finish before trying again.
 - `blocking transaction: ...` — investigate the long transaction before trying again.
 
 ## Emergency rollback
