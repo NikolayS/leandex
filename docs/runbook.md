@@ -41,6 +41,23 @@ select jobname, schedule, command, database, active from cron.job where jobname 
 select cron.unschedule('leandex_daily');  -- disable
 ```
 
+### pg_cron log hygiene
+
+`pg_cron` writes one row to `cron.job_run_details` per job execution and never purges that table. `leandex`'s own schedule is small (a handful of runs per day), so its contribution is negligible — but if you share the cron instance with high-frequency tickers, the table grows fast.
+
+Recommended: disable `cron.log_run`. Errors from failed jobs still appear in the Postgres server log (`cron.log_min_messages` defaults to `WARNING`) — you lose nothing important, only the `job_run_details` table entries.
+
+```sql
+alter system set cron.log_run = off;  -- requires Postgres restart (postmaster context)
+```
+
+If other jobs on this instance need run history, schedule periodic cleanup instead:
+
+```sql
+delete from cron.job_run_details
+where end_time < now() - interval '7 days';
+```
+
 ### Scheduling with external schedulers
 
 Prefer running a single `psql` command from your scheduler rather than wrapping leandex in a repository shell helper:
