@@ -241,6 +241,23 @@ PGPASSWORD='your_password' psql \
 
 Start with `periodic(false)` until candidates look sane, run during a real maintenance window, watch WAL, replica lag, IO, and lock waits, and expand scope gradually. To pause everything globally, set `skip_index_rebuild` to `true` (see [docs/runbook.md](docs/runbook.md)).
 
+### pg_cron log hygiene
+
+`pg_cron` writes one row to `cron.job_run_details` per job execution and does not purge that table. `leandex` itself only schedules a handful of runs per day, so growth is small — but if you share `pg_cron` with high-frequency tickers, the table grows fast.
+
+Recommended: disable `cron.log_run`. Errors from failed jobs still appear in the Postgres server log (`cron.log_min_messages` defaults to `WARNING`) — you lose nothing important, only the `job_run_details` table entries.
+
+```sql
+alter system set cron.log_run = off;  -- requires Postgres restart (postmaster context)
+```
+
+If other jobs on this instance need run history, schedule periodic cleanup instead:
+
+```sql
+delete from cron.job_run_details
+where end_time < now() - interval '7 days';
+```
+
 ## Comparison
 
 | Tool | Concurrent rebuild | History | Multi-DB | No target-DB objects | Managed-PG friendly |
