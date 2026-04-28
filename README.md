@@ -3,7 +3,7 @@
 [![CI](https://github.com/NikolayS/leandex/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/leandex/actions/workflows/ci.yml)
 [![Postgres 13-18](https://img.shields.io/badge/Postgres-13--18-336791?logo=postgresql&logoColor=white)](https://github.com/NikolayS/leandex)
 [![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
-[![Anti-extension](https://img.shields.io/badge/Anti--extension-control_plane-green)](#what-anti-extension-means)
+[![Anti-extension](https://img.shields.io/badge/Anti--extension-control_plane-green)](#why-anti-extension)
 
 Keep Postgres indexes lean: detect bloat, rebuild safely, and keep durable history of every reindex.
 
@@ -11,7 +11,7 @@ Keep Postgres indexes lean: detect bloat, rebuild safely, and keep durable histo
 
 ## Contents
 
-- [What "anti-extension" means](#what-anti-extension-means)
+- [Why "anti-extension"](#why-anti-extension)
 - [What leandex does](#what-leandex-does)
 - [What leandex refuses to do](#what-leandex-refuses-to-do)
 - [Quick start](#quick-start)
@@ -25,19 +25,19 @@ Keep Postgres indexes lean: detect bloat, rebuild safely, and keep durable histo
 - [Documentation](#documentation)
 - [License](#license)
 
-## What "anti-extension" means
+## Why "anti-extension"
 
-"Anti-extension" is a deployment posture, not an ideology. The point is that real index maintenance shouldn't require installing C code on your database server or running a sidecar process next to it. With `leandex`, you don't need:
+The reason is portability. A new C extension only helps the people whose Postgres provider has agreed to ship it. On RDS, Aurora, Cloud SQL, Azure, Supabase, Crunchy Bridge, and most managed platforms, that decision is not yours, the timeline is not yours, and historically it can take years — or never happen at all.
 
-- a compiled C extension on the Postgres host;
-- a `shared_preload_libraries` change, and therefore no Postgres restart;
-- a background worker, daemon, or external service to babysit;
-- any schema, table, function, or trigger inside your application databases;
-- superuser on the targets — only the privileges needed to reindex.
+`leandex` sidesteps that loop entirely. It only depends on building blocks that are already available virtually everywhere Postgres runs:
 
-You get a single SQL file, loaded once into one isolated control database. From there it talks to targets over `postgres_fdw` user mappings (for credentials) and `dblink` (to drive `reindex index concurrently`, which can't run inside a normal transaction block).
+- `postgres_fdw` and `dblink` — standard contrib extensions, allow-listed by every major managed provider;
+- `pg_cron` for scheduling where it's available, or any external ticker (system cron, Kubernetes CronJob, GitHub Actions, Lambda, …) where it isn't;
+- the `reindex index concurrently` command, built into Postgres since 12.
 
-This is the same posture as [`pg_ash`](https://github.com/NikolayS/pg_ash) and [`PgQue`](https://github.com/NikolayS/pgque): pick the smallest tool that does the job, and keep it out of the hot path. It is also what makes `leandex` work on managed Postgres, where you usually can't install custom C extensions but `postgres_fdw` and `dblink` are already available.
+That means no waiting on a vendor to support a new extension, no `shared_preload_libraries` change, no Postgres restart, no background worker or sidecar daemon, and nothing installed inside your application databases. Just a single SQL file loaded once into one isolated control database, and a role with enough privileges to reindex on the targets.
+
+This is the same posture as [`pg_ash`](https://github.com/NikolayS/pg_ash) and [`PgQue`](https://github.com/NikolayS/pgque): build on what's already in the box, so the tool runs wherever your databases run.
 
 ## What leandex does
 
