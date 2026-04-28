@@ -73,12 +73,28 @@ insert into leandex.config (
   'default retention period for reindex history'
 ), (
   'lock_timeout',
-  '5s',
+  '30s',
   'remote lock_timeout applied before reindex'
 ), (
-  'statement_timeout',
+  'idle_in_transaction_session_timeout',
+  '1min',
+  'remote idle_in_transaction_session_timeout applied before reindex'
+), (
+  'idle_session_timeout',
   '0',
-  'remote statement_timeout applied before reindex; 0 disables it'
+  'remote idle_session_timeout applied before reindex'
+), (
+  'max_parallel_reindexes',
+  '1',
+  'maximum concurrent reindexes per target database'
+), (
+  'respect_external_index_activity',
+  'true',
+  'skip reindex start if external create index or reindex activity is active'
+), (
+  'min_window_remaining',
+  '0',
+  'minimum remaining time in an allowed start window before a reindex may start'
 );
 
 -- Default database-level setting
@@ -143,7 +159,8 @@ create table leandex.reindex_history (
   estimated_tuples bigint not null,
   reindex_duration interval,  -- null while REINDEX is in progress or failed
   analyze_duration interval,  -- null while REINDEX is in progress or failed
-  status text not null default 'completed' check (status in ('in_progress', 'completed', 'failed')),
+  status text not null default 'completed' check (status in ('in_progress', 'completed', 'failed', 'skipped')),
+  skip_reason text,
   error_message text
 );
 
@@ -169,7 +186,12 @@ create table leandex.index_latest_state (
   indexsize bigint not null,
   indisvalid boolean not null default true,
   estimated_tuples bigint not null,
-  best_ratio real
+  best_ratio real,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  last_seen_relfilenode oid,
+  baseline_source text not null default 'observed' check (baseline_source in ('observed', 'post_reindex', 'manual')),
+  baseline_confidence text not null default 'low' check (baseline_confidence in ('low', 'high'))
 );
 
 create unique index index_latest_state_oid_index on leandex.index_latest_state(datid, indexrelid);
@@ -194,7 +216,7 @@ create view leandex.history as
     estimated_tuples as tuples,
     date_trunc('seconds', reindex_duration) as duration,
     status,
-    left(error_message, 100) as error
+    left(coalesce(skip_reason, error_message), 100) as error
   from leandex.reindex_history order by id desc;
 
 
@@ -207,7 +229,7 @@ create table leandex.tables_version (
 
 create unique index tables_version_single_row on leandex.tables_version((version is not null));
 
-insert into leandex.tables_version values(1);
+insert into leandex.tables_version values(2);
 
 
 /*

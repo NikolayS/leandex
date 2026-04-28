@@ -111,6 +111,38 @@ call leandex.do_reindex('<db>', '<schema>', '<table>', '<index>', false);
 call leandex.do_reindex('<db>', '<schema>', '<table>', '<index>', true);
 ```
 
+### Guardrail tuning
+```sql
+-- Only allow starts during a maintenance window
+select leandex.set_or_replace_setting(
+  '<db>', null, null, null,
+  'allowed_start_windows',
+  '[{"days":[1,2,3,4,5,6,7],"start":"01:00","end":"05:00"}]',
+  'nightly start window'
+);
+
+-- Refuse starts when less than 20 minutes remain in the window
+select leandex.set_or_replace_setting(
+  '<db>', null, null, null,
+  'min_window_remaining',
+  '20 minutes',
+  'avoid starting too close to handoff'
+);
+
+-- Keep one active reindex starter per target DB
+select leandex.set_or_replace_setting(
+  '<db>', null, null, null,
+  'max_parallel_reindexes',
+  '1',
+  'default safety limit'
+);
+```
+
+Notes:
+- `statement_timeout` is forced to `0` for reindex sessions. Do not try to use it as a duration cap.
+- Allowed windows are start gates only. If a reindex begins inside the window and runs long, let it finish.
+- By default `respect_external_index_activity = true`, so leandex backs off when another index build or reindex is already running.
+
 ## Observability
 
 ### Health and status
@@ -141,6 +173,9 @@ select * from leandex.history limit 50;
 
 -- Only failures (investigate)
 select * from leandex.history where status = 'failed' order by ts desc;
+
+-- Skipped attempts are useful too; they tell you which guardrail fired
+select * from leandex.history where status = 'skipped' order by ts desc;
 ```
 
 ### In-progress tracking
@@ -153,7 +188,7 @@ select
   datname, schemaname, relname, indexrelname,
   pg_size_pretty(indexsize_before) as before,
   pg_size_pretty(indexsize_after)  as after,
-  reindex_duration, status, error_message, entry_timestamp
+  reindex_duration, status, skip_reason, error_message, entry_timestamp
 from leandex.reindex_history
 order by entry_timestamp desc
 limit 50;

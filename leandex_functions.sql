@@ -291,7 +291,7 @@ create function leandex._check_structure_version() returns void as
 $body$
 declare
   _tables_version integer;
-  _required_version integer := 1;
+  _required_version integer := 2;
 begin
   select version into strict _tables_version from leandex.tables_version;
 
@@ -318,7 +318,7 @@ create function leandex.check_update_structure_version() returns void as
 $body$
 declare
    _tables_version integer;
-   _required_version integer := 1;
+   _required_version integer := 2;
 begin
   select version into strict _tables_version from leandex.tables_version;
 
@@ -333,6 +333,69 @@ begin
   end loop;
 
   return;
+end;
+$body$
+language plpgsql;
+
+
+create function leandex._structure_version_1_2() returns void as
+$body$
+begin
+  alter table leandex.reindex_history
+    drop constraint if exists reindex_history_status_check;
+
+  alter table leandex.reindex_history
+    add constraint reindex_history_status_check
+    check (status in ('in_progress', 'completed', 'failed', 'skipped'));
+
+  alter table leandex.reindex_history
+    add column if not exists skip_reason text;
+
+  alter table leandex.index_latest_state
+    add column if not exists first_seen_at timestamptz not null default now(),
+    add column if not exists last_seen_at timestamptz not null default now(),
+    add column if not exists last_seen_relfilenode oid,
+    add column if not exists baseline_source text not null default 'observed',
+    add column if not exists baseline_confidence text not null default 'low';
+
+  alter table leandex.index_latest_state
+    drop constraint if exists index_latest_state_baseline_source_check;
+
+  alter table leandex.index_latest_state
+    add constraint index_latest_state_baseline_source_check
+    check (baseline_source in ('observed', 'post_reindex', 'manual'));
+
+  alter table leandex.index_latest_state
+    drop constraint if exists index_latest_state_baseline_confidence_check;
+
+  alter table leandex.index_latest_state
+    add constraint index_latest_state_baseline_confidence_check
+    check (baseline_confidence in ('low', 'high'));
+
+  update leandex.index_latest_state
+  set first_seen_at = coalesce(first_seen_at, now()),
+    last_seen_at = coalesce(last_seen_at, coalesce(first_seen_at, now())),
+    baseline_source = coalesce(baseline_source, 'observed'),
+    baseline_confidence = coalesce(baseline_confidence, 'low');
+
+  update leandex.config
+  set value = '30s',
+    comment = 'remote lock_timeout applied before reindex'
+  where datname is null
+    and key = 'lock_timeout'
+    and value = '5s';
+
+  insert into leandex.config (key, value, comment)
+  values
+    ('idle_in_transaction_session_timeout', '1min', 'remote idle_in_transaction_session_timeout applied before reindex'),
+    ('idle_session_timeout', '0', 'remote idle_session_timeout applied before reindex'),
+    ('max_parallel_reindexes', '1', 'maximum concurrent reindexes per target database'),
+    ('respect_external_index_activity', 'true', 'skip reindex start if external create index or reindex activity is active'),
+    ('min_window_remaining', '0', 'minimum remaining time in an allowed start window before a reindex may start')
+  on conflict (key) where datname is null do nothing;
+
+  update leandex.tables_version
+  set version = 2;
 end;
 $body$
 language plpgsql;
@@ -601,7 +664,8 @@ create function leandex._remote_get_indexes_info(
   indexrelname name,
   indisvalid boolean,
   indexsize bigint,
-  estimated_tuples bigint
+  estimated_tuples bigint,
+  relfilenode oid
 ) as
 $body$
 declare
@@ -625,10 +689,8 @@ begin
     _res.indexrelname,
     _res.indisvalid,
     _res.indexsize,
-    -- Clamp zero tuples to 1 to avoid division by zero and infinite bloat estimates in calculations
-    greatest(1, indexreltuples)
-    -- do not apply relsize/relpage correction; that approach was found to be unnecessarily complex and unreliable
-    -- greatest(1, (case when relpages=0 then indexreltuples else relsize*indexreltuples/(relpages*current_setting('block_size')) end as estimated_tuples))
+    greatest(1, indexreltuples),
+    _res.relfilenode
   from
     dblink(_datname,
       format(
@@ -640,37 +702,22 @@ begin
             i.relname as indexrelname,
             x.indisvalid,
             i.reltuples::bigint as indexreltuples,
-            pg_catalog.pg_relation_size(i.oid)::bigint as indexsize
-            -- debug only
-            -- , pg_namespace.nspname
-            -- , c3.relname,
-            -- , am.amname
+            pg_catalog.pg_relation_size(i.oid)::bigint as indexsize,
+            coalesce(nullif(i.relfilenode, 0), i.oid)::oid as relfilenode
           from pg_index as x
           join pg_catalog.pg_class as c           on c.oid = x.indrelid
           join pg_catalog.pg_class as i           on i.oid = x.indexrelid
           join pg_catalog.pg_namespace as n       on n.oid = c.relnamespace
           join pg_catalog.pg_am as a              on a.oid = i.relam
-          -- TOAST indexes info
           left join pg_catalog.pg_class as c1     on c1.reltoastrelid = c.oid and n.nspname = 'pg_toast'
           left join pg_catalog.pg_namespace as n1 on c1.relnamespace = n1.oid
-
           where true
-          -- limit reindex for indexes on tables/mviews/TOAST
-          -- and c.relkind = any (array['r'::"char", 't'::"char", 'm'::"char"])
-          -- limit reindex for indexes on tables/mviews (skip TOAST until bugfix of BUG #17268)
-          and ((c.relkind = any (array['r'::"char", 'm'::"char"])) or ((c.relkind = 't'::"char") and %s))
-          -- ignore exclusion constraints
-          and not exists (select from pg_constraint where pg_constraint.conindid = i.oid and pg_constraint.contype = 'x')
-          -- ignore indexes for system tables
-          and n.nspname not in ('pg_catalog', 'information_schema')
-          -- ignore indexes on TOAST tables of system tables
-          and (n1.nspname is null or n1.nspname not in ('pg_catalog', 'information_schema', 'leandex'))
-          -- skip BRIN indexes... please see BUG #17205 https://www.postgresql.org/message-id/flat/17205-42b1d8f131f0cf97%%40postgresql.org
-          and a.amname not in ('brin') and x.indislive
-          -- skip indexes on temp relations
-          and c.relpersistence <> 't' -- t = temporary table/sequence
-          -- debug only
-          -- order by 1,2,3
+            and ((c.relkind = any (array['r'::"char", 'm'::"char"])) or ((c.relkind = 't'::"char") and %s))
+            and not exists (select from pg_constraint where pg_constraint.conindid = i.oid and pg_constraint.contype = 'x')
+            and n.nspname not in ('pg_catalog', 'information_schema')
+            and (n1.nspname is null or n1.nspname not in ('pg_catalog', 'information_schema', 'leandex'))
+            and a.amname not in ('brin') and x.indislive
+            and c.relpersistence <> 't'
         $sql$,
         _use_toast_tables
       )
@@ -682,7 +729,8 @@ begin
       indexrelname name,
       indisvalid boolean,
       indexreltuples bigint,
-      indexsize bigint
+      indexsize bigint,
+      relfilenode oid
     ),
     pg_database as d
     where
@@ -711,36 +759,43 @@ declare
   index_info record;
   _connection_created boolean := false;
 begin
-  -- Establish dblink connection for managed services mode with cleanup guarantee
   if dblink_get_connections() is null or not (_datname = any(dblink_get_connections())) then
     perform leandex._dblink_connect_if_not(_datname);
     _connection_created := true;
   end if;
 
-  -- merge index data fetched from the database and index_latest_state
-  -- now keep info about all potentially interesting indexes (even small ones)
-  -- we can do it now because we keep exactly one entry in index_latest_state per index (without history)
   with _actual_indexes as (
-    select datid, indexrelid, datname, schemaname, relname, indexrelname, indisvalid, indexsize, estimated_tuples
+    select datid, indexrelid, datname, schemaname, relname, indexrelname,
+      indisvalid, indexsize, estimated_tuples, relfilenode
     from leandex._remote_get_indexes_info(_datname, _schemaname, _relname, _indexrelname)
+  ),
+  _previous_state as (
+    select distinct on (datname, schemaname, relname, indexrelname)
+      datname, schemaname, relname, indexrelname, indexrelid,
+      first_seen_at, last_seen_at, last_seen_relfilenode,
+      baseline_source, baseline_confidence, best_ratio
+    from leandex.index_latest_state
+    where datname = _datname
+      and (_schemaname is null or schemaname = _schemaname)
+      and (_relname is null or relname = _relname)
+      and (_indexrelname is null or indexrelname = _indexrelname)
+    order by datname, schemaname, relname, indexrelname, mtime desc
   ),
   _old_indexes as (
     delete from leandex.index_latest_state as i
     where not exists (
-      select from _actual_indexes
-      where
-        i.datid = _actual_indexes.datid
-	      and i.indexrelid = _actual_indexes.indexrelid
+      select
+      from _actual_indexes
+      where i.datid = _actual_indexes.datid
+        and i.indexrelid = _actual_indexes.indexrelid
     )
-    and i.datname = _datname
-    and (_schemaname is null or i.schemaname = _schemaname)
-    and (_relname is null or i.relname = _relname)
-    and (_indexrelname is null or i.indexrelname = _indexrelname)
+      and i.datname = _datname
+      and (_schemaname is null or i.schemaname = _schemaname)
+      and (_relname is null or i.relname = _relname)
+      and (_indexrelname is null or i.indexrelname = _indexrelname)
   )
-  -- todo: do something with ugly code duplication in leandex._reindex_index and leandex._record_indexes_info
   insert into leandex.index_latest_state as i
-  (datid, datname, schemaname, relname, indexrelid, indexrelname, indexsize, indisvalid, estimated_tuples, best_ratio)
-  select
+  (
     datid,
     datname,
     schemaname,
@@ -750,17 +805,93 @@ begin
     indexsize,
     indisvalid,
     estimated_tuples,
+    best_ratio,
+    first_seen_at,
+    last_seen_at,
+    last_seen_relfilenode,
+    baseline_source,
+    baseline_confidence
+  )
+  select
+    a.datid,
+    a.datname,
+    a.schemaname,
+    a.relname,
+    a.indexrelid,
+    a.indexrelname,
+    a.indexsize,
+    a.indisvalid,
+    a.estimated_tuples,
     case
-      when (indexsize > pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'minimum_reliable_index_size'))) then
-        -- initialize baseline from the current ratio on first sighting (insert),
-        -- including after REINDEX/OID change; _force_populate is not needed on insert
-        indexsize::real / estimated_tuples::real
+      when exists (
+        select 1
+        from leandex.reindex_history as h
+        where h.status = 'completed'
+          and h.datname = a.datname
+          and h.schemaname = a.schemaname
+          and h.relname = a.relname
+          and h.indexrelname = a.indexrelname
+          and h.indexrelid = a.indexrelid
+          and h.entry_timestamp >= coalesce(p.last_seen_at, '-infinity'::timestamptz)
+      )
+      and a.indexsize > pg_size_bytes(leandex.get_setting(a.datname, a.schemaname, a.relname, a.indexrelname, 'minimum_reliable_index_size')) then
+        a.indexsize::real / a.estimated_tuples::real
+      when a.indexsize > pg_size_bytes(leandex.get_setting(a.datname, a.schemaname, a.relname, a.indexrelname, 'minimum_reliable_index_size')) then
+        a.indexsize::real / a.estimated_tuples::real
       else
-        -- too small for reliable baseline
-          null
-      end
-    as best_ratio
-  from _actual_indexes
+        null
+    end as best_ratio,
+    case
+      when p.indexrelid = a.indexrelid
+        or exists (
+          select 1
+          from leandex.reindex_history as h
+          where h.status = 'completed'
+            and h.datname = a.datname
+            and h.schemaname = a.schemaname
+            and h.relname = a.relname
+            and h.indexrelname = a.indexrelname
+            and h.indexrelid = a.indexrelid
+            and h.entry_timestamp >= coalesce(p.last_seen_at, '-infinity'::timestamptz)
+        ) then coalesce(p.first_seen_at, now())
+      else now()
+    end,
+    now(),
+    a.relfilenode,
+    case
+      when exists (
+        select 1
+        from leandex.reindex_history as h
+        where h.status = 'completed'
+          and h.datname = a.datname
+          and h.schemaname = a.schemaname
+          and h.relname = a.relname
+          and h.indexrelname = a.indexrelname
+          and h.indexrelid = a.indexrelid
+          and h.entry_timestamp >= coalesce(p.last_seen_at, '-infinity'::timestamptz)
+      ) then 'post_reindex'
+      else 'observed'
+    end,
+    case
+      when exists (
+        select 1
+        from leandex.reindex_history as h
+        where h.status = 'completed'
+          and h.datname = a.datname
+          and h.schemaname = a.schemaname
+          and h.relname = a.relname
+          and h.indexrelname = a.indexrelname
+          and h.indexrelid = a.indexrelid
+          and h.entry_timestamp >= coalesce(p.last_seen_at, '-infinity'::timestamptz)
+      ) then 'high'
+      else 'low'
+    end
+  from _actual_indexes as a
+  left join _previous_state as p
+    on p.datname = a.datname
+   and p.schemaname = a.schemaname
+   and p.relname = a.relname
+   and p.indexrelname = a.indexrelname
   on conflict (datid, indexrelid)
   do update set
     mtime = now(),
@@ -771,45 +902,85 @@ begin
     indisvalid = excluded.indisvalid,
     indexsize = excluded.indexsize,
     estimated_tuples = excluded.estimated_tuples,
-    best_ratio =
-      case
-        -- _force_populate=true set (or write) best ratio to current ratio (except the case when index too small to be reliably estimated)
-        when (_force_populate and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
-          then excluded.indexsize::real / excluded.estimated_tuples::real
-        -- if index is too small, keep previous
-        when (excluded.indexsize < pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
-          then i.best_ratio
-        -- fill only if missing
-        when (i.best_ratio is null)
-          then excluded.indexsize::real / excluded.estimated_tuples::real
-        -- otherwise keep baseline unchanged (non-increasing, unaffected by reltuples drift)
-        else least(i.best_ratio, excluded.indexsize::real / excluded.estimated_tuples::real)
-      end;
+    last_seen_at = now(),
+    last_seen_relfilenode = excluded.last_seen_relfilenode,
+    best_ratio = case
+      when exists (
+          select 1
+          from leandex.reindex_history as h
+          where h.status = 'completed'
+            and h.datname = i.datname
+            and h.schemaname = i.schemaname
+            and h.relname = i.relname
+            and h.indexrelname = i.indexrelname
+            and h.indexrelid = i.indexrelid
+            and h.entry_timestamp >= i.last_seen_at
+        )
+        and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size'))
+        then excluded.indexsize::real / excluded.estimated_tuples::real
+      when _force_populate
+        and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size'))
+        then excluded.indexsize::real / excluded.estimated_tuples::real
+      when excluded.indexsize < pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size'))
+        then i.best_ratio
+      when i.best_ratio is null
+        then excluded.indexsize::real / excluded.estimated_tuples::real
+      else
+        least(i.best_ratio, excluded.indexsize::real / excluded.estimated_tuples::real)
+    end,
+    baseline_source = case
+      when exists (
+          select 1
+          from leandex.reindex_history as h
+          where h.status = 'completed'
+            and h.datname = i.datname
+            and h.schemaname = i.schemaname
+            and h.relname = i.relname
+            and h.indexrelname = i.indexrelname
+            and h.indexrelid = i.indexrelid
+            and h.entry_timestamp >= i.last_seen_at
+        ) then 'post_reindex'
+      when _force_populate then 'observed'
+      else i.baseline_source
+    end,
+    baseline_confidence = case
+      when exists (
+          select 1
+          from leandex.reindex_history as h
+          where h.status = 'completed'
+            and h.datname = i.datname
+            and h.schemaname = i.schemaname
+            and h.relname = i.relname
+            and h.indexrelname = i.indexrelname
+            and h.indexrelid = i.indexrelid
+            and h.entry_timestamp >= i.last_seen_at
+        ) then 'high'
+      when _force_populate then 'low'
+      else i.baseline_confidence
+    end;
 
-  -- tell about not valid indexes
   for index_info in
-    select indexrelname, relname, schemaname, datname from leandex.index_latest_state
-      where not indisvalid
+    select indexrelname, relname, schemaname, datname
+    from leandex.index_latest_state
+    where not indisvalid
       and datname = _datname
       and (_schemaname is null or schemaname = _schemaname)
       and (_relname is null or relname = _relname)
       and (_indexrelname is null or indexrelname = _indexrelname)
-    loop
-      raise warning 'Not valid index % on %.% found in %.',
+  loop
+    raise warning 'Not valid index % on %.% found in %.',
       index_info.indexrelname, index_info.schemaname, index_info.relname, index_info.datname;
-    end loop;
+  end loop;
 
 exception when others then
-  -- Guaranteed connection cleanup on any exception
   if _connection_created and dblink_get_connections() is not null
      and _datname = any(dblink_get_connections()) then
     perform dblink_disconnect(_datname);
   end if;
-  raise; -- Re-raise the original exception
+  raise;
 end;
 $body$
 language plpgsql;
-
 
 /*
  * Clean up old and stale records from tracking tables
@@ -893,6 +1064,500 @@ end;
 $body$
 language plpgsql strict;
 
+
+
+create function leandex._record_reindex_history_event(
+  _datname name,
+  _schemaname name,
+  _relname name,
+  _indexrelname name,
+  _status text,
+  _skip_reason text default null,
+  _error_message text default null
+) returns bigint as
+$body$
+declare
+  _history_id bigint;
+begin
+  insert into leandex.reindex_history (
+    datid,
+    datname,
+    schemaname,
+    relname,
+    indexrelid,
+    indexrelname,
+    indexsize_before,
+    indexsize_after,
+    estimated_tuples,
+    reindex_duration,
+    analyze_duration,
+    entry_timestamp,
+    status,
+    skip_reason,
+    error_message
+  )
+  select datid,
+    datname,
+    schemaname,
+    relname,
+    indexrelid,
+    indexrelname,
+    indexsize,
+    null,
+    estimated_tuples,
+    null,
+    null,
+    now(),
+    _status,
+    _skip_reason,
+    _error_message
+  from (
+    select distinct on (datid, indexrelid)
+      datid, datname, schemaname, relname, indexrelid, indexrelname, indexsize, estimated_tuples
+    from leandex.index_latest_state
+    where datname = _datname
+      and schemaname = _schemaname
+      and relname = _relname
+      and indexrelname = _indexrelname
+    order by datid, indexrelid, mtime desc
+  ) as latest
+  returning id into _history_id;
+
+  return _history_id;
+end;
+$body$
+language plpgsql;
+
+
+create function leandex._matching_window_end(
+  _windows jsonb,
+  _ts timestamptz default current_timestamp
+) returns timestamptz as
+$body$
+declare
+  _window jsonb;
+  _days integer[];
+  _dow integer := extract(isodow from _ts)::integer;
+  _prev_dow integer := case when extract(isodow from _ts)::integer = 1 then 7 else extract(isodow from _ts)::integer - 1 end;
+  _start_time time;
+  _end_time time;
+  _day_start timestamptz := date_trunc('day', _ts);
+  _candidate_end timestamptz;
+  _matched_end timestamptz;
+begin
+  if _windows is null then
+    return null;
+  end if;
+
+  for _window in select value from jsonb_array_elements(_windows)
+  loop
+    select coalesce(array_agg(value::text::integer), array[1,2,3,4,5,6,7])
+    into _days
+    from jsonb_array_elements(coalesce(_window->'days', '[1,2,3,4,5,6,7]'::jsonb));
+
+    _start_time := (_window->>'start')::time;
+    _end_time := (_window->>'end')::time;
+
+    if _end_time > _start_time then
+      if _dow = any(_days)
+         and _ts >= _day_start + _start_time
+         and _ts < _day_start + _end_time then
+        _candidate_end := _day_start + _end_time;
+      else
+        _candidate_end := null;
+      end if;
+    else
+      if _dow = any(_days)
+         and _ts >= _day_start + _start_time then
+        _candidate_end := _day_start + interval '1 day' + _end_time;
+      elsif _prev_dow = any(_days)
+         and _ts < _day_start + _end_time then
+        _candidate_end := _day_start + _end_time;
+      else
+        _candidate_end := null;
+      end if;
+    end if;
+
+    if _candidate_end is not null and (_matched_end is null or _candidate_end > _matched_end) then
+      _matched_end := _candidate_end;
+    end if;
+  end loop;
+
+  return _matched_end;
+end;
+$body$
+language plpgsql stable;
+
+
+create function leandex._evaluate_reindex_start(
+  _datname name,
+  _schemaname name,
+  _relname name,
+  _indexrelname name
+) returns table(
+  allowed_to_start boolean,
+  reason text,
+  window_remaining interval
+) as
+$body$
+declare
+  _allowed_windows jsonb;
+  _allowed_end timestamptz;
+  _min_window_remaining interval := coalesce(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'min_window_remaining'), '0')::interval;
+begin
+  if nullif(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'allowed_start_windows'), '') is not null then
+    _allowed_windows := leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'allowed_start_windows')::jsonb;
+  end if;
+
+
+  if _allowed_windows is not null then
+    _allowed_end := leandex._matching_window_end(_allowed_windows, current_timestamp);
+    if _allowed_end is null then
+      return query select false, 'outside allowed start window', null::interval;
+      return;
+    end if;
+
+    if _allowed_end - current_timestamp < _min_window_remaining then
+      return query select false,
+        format('min_window_remaining not satisfied (%s remaining, need %s)', _allowed_end - current_timestamp, _min_window_remaining),
+        _allowed_end - current_timestamp;
+      return;
+    end if;
+
+    return query select true, null::text, _allowed_end - current_timestamp;
+    return;
+  end if;
+
+  return query select true, null::text, null::interval;
+end;
+$body$
+language plpgsql stable;
+
+
+create function leandex._parallel_reindex_lock_key(
+  _datname name,
+  _slot integer
+) returns bigint as
+$body$
+  select hashtextextended(format('leandex-reindex:%s:%s', _datname, _slot), 0);
+$body$
+language sql immutable strict;
+
+
+create function leandex._try_acquire_reindex_slot(
+  _datname name,
+  _max_parallel integer
+) returns integer as
+$body$
+declare
+  _slot integer;
+begin
+  for _slot in 1..greatest(coalesce(_max_parallel, 1), 1)
+  loop
+    if pg_try_advisory_lock(leandex._parallel_reindex_lock_key(_datname, _slot)) then
+      return _slot;
+    end if;
+  end loop;
+
+  return null;
+end;
+$body$
+language plpgsql;
+
+
+create function leandex._release_reindex_slot(
+  _datname name,
+  _slot integer
+) returns void as
+$body$
+begin
+  if _slot is not null then
+    perform pg_advisory_unlock(leandex._parallel_reindex_lock_key(_datname, _slot));
+  end if;
+end;
+$body$
+language plpgsql;
+
+
+create procedure leandex._clear_current_processed_index(
+  _datname name,
+  _schemaname name,
+  _relname name,
+  _indexrelname name
+) as
+$body$
+begin
+  delete from leandex.current_processed_index
+  where datname = _datname
+    and schemaname = _schemaname
+    and relname = _relname
+    and indexrelname = _indexrelname;
+end;
+$body$
+language plpgsql;
+
+
+create function leandex._apply_remote_reindex_session_settings(
+  _datname name,
+  _schemaname name,
+  _relname name,
+  _indexrelname name
+) returns jsonb as
+$body$
+declare
+  _server_version_num integer;
+  _lock_timeout text := coalesce(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'lock_timeout'), '30s');
+  _idle_in_tx_timeout text := coalesce(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'idle_in_transaction_session_timeout'), '1min');
+  _idle_session_timeout text := coalesce(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'idle_session_timeout'), '0');
+  _settings record;
+begin
+  perform leandex._dblink_connect_if_not(_datname);
+
+  perform dblink_exec(
+    _datname,
+    format('set application_name = %L', format('leandex:%s:%s.%s.%s', current_database(), _schemaname, _relname, _indexrelname))
+  );
+
+  select server_version_num into _server_version_num
+  from dblink(
+    _datname,
+    'select current_setting(''server_version_num'')::int'
+  ) as t(server_version_num integer);
+
+  perform dblink_exec(_datname, format('set lock_timeout = %L', _lock_timeout));
+  perform dblink_exec(_datname, 'set statement_timeout = 0');
+  perform dblink_exec(_datname, format('set idle_in_transaction_session_timeout = %L', _idle_in_tx_timeout));
+
+  if _server_version_num >= 140000 then
+    perform dblink_exec(_datname, format('set idle_session_timeout = %L', _idle_session_timeout));
+  end if;
+
+  if _server_version_num >= 170000 then
+    perform dblink_exec(_datname, 'set transaction_timeout = 0');
+  end if;
+
+  select * into _settings
+  from dblink(
+    _datname,
+    $sql$
+      select current_setting('server_version_num')::int,
+        current_setting('lock_timeout'),
+        current_setting('statement_timeout'),
+        current_setting('idle_in_transaction_session_timeout'),
+        current_setting('idle_session_timeout', true),
+        current_setting('transaction_timeout', true),
+        current_setting('application_name')
+    $sql$
+  ) as t(
+    server_version_num integer,
+    lock_timeout text,
+    statement_timeout text,
+    idle_in_transaction_session_timeout text,
+    idle_session_timeout text,
+    transaction_timeout text,
+    application_name text
+  );
+
+  return jsonb_build_object(
+    'server_version_num', _settings.server_version_num,
+    'lock_timeout', _settings.lock_timeout,
+    'statement_timeout', _settings.statement_timeout,
+    'idle_in_transaction_session_timeout', _settings.idle_in_transaction_session_timeout,
+    'idle_session_timeout', _settings.idle_session_timeout,
+    'transaction_timeout', _settings.transaction_timeout,
+    'application_name', _settings.application_name
+  );
+end;
+$body$
+language plpgsql;
+
+
+create function leandex._detect_reindex_blockers(
+  _datname name,
+  _schemaname name,
+  _relname name,
+  _indexrelname name
+) returns table(
+  blocker_reason text
+) as
+$body$
+declare
+  _respect_external boolean := coalesce(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'respect_external_index_activity'), 'true')::boolean;
+  _lock_timeout text := coalesce(leandex.get_setting(_datname, _schemaname, _relname, _indexrelname, 'lock_timeout'), '30s');
+  _reason text;
+begin
+  perform leandex._dblink_connect_if_not(_datname);
+
+  if _respect_external then
+    begin
+      select reason into _reason
+      from dblink(
+        _datname,
+        format(
+          $sql$
+            select format(
+              'external index activity: pid=%%s command=%%s app=%%s',
+              a.pid,
+              p.command,
+              coalesce(a.application_name, '<unknown>')
+            ) as reason
+            from pg_stat_progress_create_index as p
+            join pg_stat_activity as a using (pid)
+            join pg_class as c on c.oid = p.relid
+            join pg_namespace as n on n.oid = c.relnamespace
+            where n.nspname = %1$L
+              and c.relname = %2$L
+              and coalesce(a.application_name, '') not like 'leandex:%%'
+            limit 1
+          $sql$,
+          _schemaname,
+          _relname
+        )
+      ) as t(reason text);
+    exception when others then
+      _reason := null;
+    end;
+
+    if _reason is null then
+      select reason into _reason
+      from dblink(
+        _datname,
+        format(
+          $sql$
+            select format(
+              'external index activity: pid=%%s state=%%s app=%%s',
+              pid,
+              state,
+              coalesce(application_name, '<unknown>')
+            ) as reason
+            from pg_stat_activity
+            where pid <> pg_backend_pid()
+              and coalesce(application_name, '') not like 'leandex:%%'
+              and state <> 'idle'
+              and (
+                lower(query) like 'create index%%'
+                or lower(query) like 'reindex%%'
+              )
+              and lower(query) like lower(%1$L)
+              and lower(query) like lower(%2$L)
+            limit 1
+          $sql$,
+          '%' || _schemaname || '%',
+          '%' || _relname || '%'
+        )
+      ) as t(reason text);
+    end if;
+
+    if _reason is not null then
+      return query select _reason;
+      return;
+    end if;
+  end if;
+
+  select reason into _reason
+  from dblink(
+    _datname,
+    $sql$
+      select format(
+        'old snapshot: pid=%s age=%s backend_xmin=%s app=%s state=%s',
+        a.pid,
+        clock_timestamp() - a.xact_start,
+        a.backend_xmin,
+        coalesce(a.application_name, '<unknown>'),
+        a.state
+      ) as reason
+      from pg_stat_activity as a
+      where a.datname = current_database()
+        and a.pid <> pg_backend_pid()
+        and a.backend_xmin is not null
+        and coalesce(a.application_name, '') not like 'leandex:%'
+      order by a.xact_start nulls last, a.backend_start
+      limit 1
+    $sql$
+  ) as t(reason text);
+
+  if _reason is not null then
+    return query select _reason;
+    return;
+  end if;
+
+  select reason into _reason
+  from dblink(
+    _datname,
+    format(
+      $sql$
+        select format(
+          'blocking transaction: pid=%%s age=%%s app=%%s state=%%s',
+          a.pid,
+          clock_timestamp() - a.xact_start,
+          coalesce(a.application_name, '<unknown>'),
+          a.state
+        ) as reason
+        from pg_locks as l
+        join pg_stat_activity as a on a.pid = l.pid
+        join pg_class as c on c.oid = l.relation
+        join pg_namespace as n on n.oid = c.relnamespace
+        where l.granted
+          and a.pid <> pg_backend_pid()
+          and a.xact_start is not null
+          and a.xact_start <= clock_timestamp() - %1$L::interval
+          and coalesce(a.application_name, '') not like 'leandex:%%'
+          and n.nspname = %2$L
+          and c.relname in (%3$L, %4$L)
+          and l.mode in (
+            'ShareUpdateExclusiveLock',
+            'ShareLock',
+            'ShareRowExclusiveLock',
+            'ExclusiveLock',
+            'AccessExclusiveLock'
+          )
+        order by a.xact_start
+        limit 1
+      $sql$,
+      _lock_timeout,
+      _schemaname,
+      _relname,
+      _indexrelname
+    )
+  ) as t(reason text);
+
+  if _reason is not null then
+    return query select _reason;
+  end if;
+end;
+$body$
+language plpgsql;
+
+
+create function leandex._run_remote_reindex(
+  _datname name,
+  _schemaname name,
+  _relname name,
+  _indexrelname name
+) returns text as
+$body$
+begin
+  perform leandex._apply_remote_reindex_session_settings(
+    _datname,
+    _schemaname,
+    _relname,
+    _indexrelname
+  );
+
+  perform dblink_exec(
+    _datname,
+    format('reindex index concurrently %I.%I', _schemaname, _indexrelname)
+  );
+
+  return null;
+exception when others then
+  return case
+    when sqlerrm ilike '%lock timeout%' then 'blocking transaction: ' || sqlerrm
+    else sqlerrm
+  end;
+end;
+$body$
+language plpgsql;
 
 /*
  * Perform concurrent reindexing of a specific index
@@ -1018,11 +1683,17 @@ create procedure leandex.do_reindex(
 $body$
 declare
   _index record;
-  _connection_created boolean := false;
+  _start_gate record;
+  _blocker record;
+  _slot integer;
+  _max_parallel integer;
+  _final_size bigint;
+  _final_info record;
+  _error_message text;
+  _history_id bigint;
 begin
   perform leandex._check_structure_version();
 
-  -- IMPORTANT: Do not run in the current database to prevent deadlocks
   if _datname = current_database() then
     raise exception using
       message = format(
@@ -1032,173 +1703,149 @@ begin
       hint = 'Use separate control database.';
   end if;
 
-  -- Ensure dblink connection is established before starting any transaction with cleanup guarantee
   if dblink_get_connections() is null or not (_datname = any(dblink_get_connections())) then
     perform leandex._dblink_connect_if_not(_datname);
-    _connection_created := true;
-    commit; -- Commit after connection to minimize risk of locking issues
+    commit;
   end if;
+
   for _index in
     select datname, schemaname, relname, indexrelname, indexsize, estimated_bloat
-    -- index_size_threshold check logic is now handled inside get_index_bloat_estimates
-    -- The force option causes index_rebuild_scale_factor to be ignored, reindexing all eligible indexes
-    -- Indexes that are too small (below index_size_threshold) or explicitly set to skip in the config are always ignored, even with force enabled
-    -- todo: consider revisiting this logic in the future
     from leandex.get_index_bloat_estimates(_datname)
-    where
-      (_schemaname is null or schemaname = _schemaname)
+    where (_schemaname is null or schemaname = _schemaname)
       and (_relname is null or relname = _relname)
       and (_indexrelname is null or indexrelname = _indexrelname)
-      and (_force or
-        (
-          -- ignore indexes that are too small to be relevant
-          indexsize >= pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_size_threshold'))
-          -- ignore indexes explicitly marked to be skipped
-          and leandex.get_setting(datname, schemaname, relname, indexrelname, 'skip')::boolean is distinct from true
-          -- placeholder for future configurability using get_setting
-          and (
-            estimated_bloat is null
-            or estimated_bloat >= leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_rebuild_scale_factor')::float
-          )
+      and (_force or (
+        indexsize >= pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_size_threshold'))
+        and leandex.get_setting(datname, schemaname, relname, indexrelname, 'skip')::boolean is distinct from true
+        and (
+          estimated_bloat is null
+          or estimated_bloat >= leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_rebuild_scale_factor')::float
         )
-      )
-    loop
-      -- Record what we're working on
+      ))
+  loop
+    select * into _start_gate
+    from leandex._evaluate_reindex_start(_index.datname, _index.schemaname, _index.relname, _index.indexrelname);
+
+    if not _start_gate.allowed_to_start then
+      perform leandex._record_reindex_history_event(
+        _index.datname,
+        _index.schemaname,
+        _index.relname,
+        _index.indexrelname,
+        'skipped',
+        _start_gate.reason
+      );
+      continue;
+    end if;
+
+    select * into _blocker
+    from leandex._detect_reindex_blockers(_index.datname, _index.schemaname, _index.relname, _index.indexrelname)
+    limit 1;
+
+    if _blocker.blocker_reason is not null then
+      perform leandex._record_reindex_history_event(
+        _index.datname,
+        _index.schemaname,
+        _index.relname,
+        _index.indexrelname,
+        'skipped',
+        _blocker.blocker_reason
+      );
+      continue;
+    end if;
+
+    _max_parallel := greatest(coalesce(leandex.get_setting(_index.datname, _index.schemaname, _index.relname, _index.indexrelname, 'max_parallel_reindexes'), '1')::integer, 1);
+
+    _slot := leandex._try_acquire_reindex_slot(_index.datname, _max_parallel);
+
+    if _slot is null then
+      perform leandex._record_reindex_history_event(
+        _index.datname,
+        _index.schemaname,
+        _index.relname,
+        _index.indexrelname,
+        'skipped',
+        format('max_parallel_reindexes reached (limit=%s)', _max_parallel)
+      );
+      continue;
+    end if;
+
+    begin
       insert into leandex.current_processed_index(
         datname,
-          schemaname,
-          relname,
-          indexrelname
-      )
-      values (
+        schemaname,
+        relname,
+        indexrelname
+      ) values (
         _index.datname,
         _index.schemaname,
         _index.relname,
         _index.indexrelname
       );
 
-      -- Record the start of the reindex operation with status 'in_progress'
-      -- Use cached information from index_latest_state rather than querying the remote database
-      insert into leandex.reindex_history (
-        datname, schemaname, relname, indexrelname,
-        indexsize_before, indexsize_after, estimated_tuples,
-        reindex_duration, analyze_duration, entry_timestamp, status
-      )
-      select
-        datname,
-        schemaname,
-        relname,
-        indexrelname,
-        indexsize,
-        null,
-        estimated_tuples,  -- null until completion
-        null,
-        null,
-        now(),
+      _history_id := leandex._record_reindex_history_event(
+        _index.datname,
+        _index.schemaname,
+        _index.relname,
+        _index.indexrelname,
         'in_progress'
-      from (
-        select distinct on (datid, indexrelid)
-          datname, schemaname, relname, indexrelname, indexsize, estimated_tuples
-        from leandex.index_latest_state
-        where datname = _index.datname
-          and schemaname = _index.schemaname
-          and relname = _index.relname
-          and indexrelname = _index.indexrelname
-          and indisvalid
-        order by datid, indexrelid, mtime desc
-      ) latest;
+      );
+    exception when others then
+      call leandex._clear_current_processed_index(_index.datname, _index.schemaname, _index.relname, _index.indexrelname);
+      perform leandex._release_reindex_slot(_index.datname, _slot);
+      _slot := null;
+      _history_id := null;
+      raise;
+    end;
 
-      -- Commit to release all locks before starting synchronous reindex
-      commit;
+    commit;
 
-      -- Perform REINDEX synchronously for robust and predictable operation
-      -- Synchronous execution enables immediate status updates and simplifies process management
-      begin
-        -- Apply remote timeout settings before REINDEX. These are session-level
-        -- settings on the dblink connection, not local control-DB settings.
-        perform dblink_exec(
-          _index.datname,
-          format('set lock_timeout = %L', leandex.get_setting(_index.datname, _index.schemaname, _index.relname, _index.indexrelname, 'lock_timeout'))
-        );
-        perform dblink_exec(
-          _index.datname,
-          format('set statement_timeout = %L', leandex.get_setting(_index.datname, _index.schemaname, _index.relname, _index.indexrelname, 'statement_timeout'))
-        );
+    begin
+      _error_message := leandex._run_remote_reindex(
+        _index.datname,
+        _index.schemaname,
+        _index.relname,
+        _index.indexrelname
+      );
 
-        -- Run REINDEX INDEX CONCURRENTLY synchronously
-        perform dblink_exec(
-          _index.datname,
-          format('reindex index concurrently %I.%I', _index.schemaname, _index.indexrelname)
-        );
+      if _error_message is null then
+        select indexrelid, indexsize into _final_info
+        from leandex._remote_get_indexes_info(_index.datname, _index.schemaname, _index.relname, _index.indexrelname)
+        where indisvalid;
 
-        raise notice 'REINDEX INDEX CONCURRENTLY completed for %.%', _index.schemaname, _index.indexrelname;
-
-        -- Retrieve the index size after reindexing is complete
-        declare
-          _final_size bigint;
-        begin
-          select indexsize into _final_size
-          from leandex._remote_get_indexes_info(_index.datname, _index.schemaname, _index.relname, _index.indexrelname)
-          where indisvalid;
-
-          -- Update reindex_history with completion timestamp, status, and final index size
-          update leandex.reindex_history
-          set
-            reindex_duration = clock_timestamp() - entry_timestamp,
-            status = 'completed',
-            indexsize_after = _final_size
-          where
-            datname = _index.datname
-            and schemaname = _index.schemaname
-            and relname = _index.relname
-            and indexrelname = _index.indexrelname
-            and status = 'in_progress';
-        end;
-
-      exception when others then
-        raise warning 'REINDEX failed for %.%: %', _index.schemaname, _index.indexrelname, sqlerrm;
-
-        -- Record failure in reindex_history with error details
         update leandex.reindex_history
-        set
-          status = 'failed',
-          error_message = sqlerrm,
+        set reindex_duration = clock_timestamp() - entry_timestamp,
+          status = 'completed',
+          indexrelid = _final_info.indexrelid,
+          indexsize_after = _final_info.indexsize,
+          skip_reason = null,
+          error_message = null
+        where id = _history_id;
+      else
+        update leandex.reindex_history
+        set status = 'failed',
+          error_message = _error_message,
           reindex_duration = clock_timestamp() - entry_timestamp
-        where
-          datname = _index.datname
-          and schemaname = _index.schemaname
-          and relname = _index.relname
-          and indexrelname = _index.indexrelname
-          and status = 'in_progress';
-      end;
+        where id = _history_id;
+      end if;
+    exception when others then
+      update leandex.reindex_history
+      set status = 'failed',
+        error_message = sqlerrm,
+        reindex_duration = clock_timestamp() - entry_timestamp
+      where id = _history_id
+        and status = 'in_progress';
+    end;
 
-      -- Clean up tracking record after successful reindex
-      delete from leandex.current_processed_index
-      where
-        datname = _index.datname
-        and schemaname = _index.schemaname
-        and relname = _index.relname
-        and indexrelname = _index.indexrelname;
-
-      -- Commit the cleanup
-      commit;
-
-      -- Completion status and tracking are updated synchronously in the preceding steps
-    end loop;
-  return;
-
--- It prevents commits from working and needs to be done differently
--- exception when others then
---   -- Guaranteed connection cleanup on any exception
---   if _connection_created and dblink_get_connections() is not null
---      and _datname = any(dblink_get_connections()) then
---     perform dblink_disconnect(_datname);
---   end if;
---   raise; -- Re-raise the original exception
+    call leandex._clear_current_processed_index(_index.datname, _index.schemaname, _index.relname, _index.indexrelname);
+    perform leandex._release_reindex_slot(_index.datname, _slot);
+    _slot := null;
+    _history_id := null;
+    commit;
+  end loop;
 end;
 $body$
 language plpgsql;
-
 
 /*
  * Force-populate index statistics and bloat baselines without reindexing
@@ -1274,80 +1921,90 @@ create procedure leandex._cleanup_our_not_valid_indexes() as
 $body$
 declare
   _index record;
+  _invalid record;
+  _base_name text;
 begin
   for _index in
-    select datname, schemaname, relname, indexrelname
-    from leandex.current_processed_index
+    select distinct datname, schemaname, relname, indexrelname
+    from leandex.reindex_history
+    where status = 'failed'
+      and entry_timestamp >= now() - interval '7 days'
   loop
-    -- Ensure we have a connection to the target database
-    if dblink_get_connections() is null or not (_index.datname = any(dblink_get_connections())) then
-      perform leandex._connect_securely(_index.datname);
-    end if;
+    begin
+      if dblink_get_connections() is null or not (_index.datname = any(dblink_get_connections())) then
+        perform leandex._connect_securely(_index.datname);
+      end if;
 
-    -- Check if the invalid _ccnew index exists
-    if exists (
-      select from dblink(_index.datname,
-        format(
-          $sql$
-            select x.indexrelid
-            from pg_index x
-            join pg_catalog.pg_class as c on c.oid = x.indrelid
-            join pg_catalog.pg_class as i on i.oid = x.indexrelid
-            join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-            where
-              n.nspname = %1$L
-              and c.relname = %2$L
-              and i.relname = %3$L
-              and not x.indisvalid
-          $sql$,
-          _index.schemaname,
-          _index.relname,
-          _index.indexrelname || '_ccnew'
-        )
-      ) as _res(indexrelid oid))
-    then
-      if not exists (
-        select from dblink(
-          _index.datname,
+      _base_name := _index.indexrelname || '_ccnew';
+
+      for _invalid in
+        select invalid_index_name
+        from dblink(_index.datname,
           format(
             $sql$
-              select x.indexrelid
+              select i.relname as invalid_index_name
               from pg_index x
               join pg_catalog.pg_class as c on c.oid = x.indrelid
               join pg_catalog.pg_class as i on i.oid = x.indexrelid
               join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-              where
-                n.nspname = %1$L
+              where n.nspname = %1$L
                 and c.relname = %2$L
-                and i.relname = %3$L
+                and not x.indisvalid
+                and left(i.relname, length(%3$L)) = %3$L
+                and substring(i.relname from length(%3$L) + 1) ~ '^[0-9]*$'
             $sql$,
             _index.schemaname,
             _index.relname,
-            _index.indexrelname
+            _base_name
           )
-        ) as _res(indexrelid oid))
-      then
-        -- Log the missing original index
-        raise warning 'The invalid index %.%_ccnew exists, but no original index %.% was found in database %',
-          _index.schemaname, _index.indexrelname, _index.schemaname, _index.indexrelname, _index.datname;
-      end if;
+        ) as _res(invalid_index_name name)
+      loop
+        if not exists (
+          select from dblink(
+            _index.datname,
+            format(
+              $sql$
+                select x.indexrelid
+                from pg_index x
+                join pg_catalog.pg_class as c on c.oid = x.indrelid
+                join pg_catalog.pg_class as i on i.oid = x.indexrelid
+                join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
+                where n.nspname = %1$L
+                  and c.relname = %2$L
+                  and i.relname = %3$L
+              $sql$,
+              _index.schemaname,
+              _index.relname,
+              _index.indexrelname
+            )
+          ) as _res(indexrelid oid))
+        then
+          raise warning 'The invalid index %.% exists, but no original index %.% was found in database %',
+            _index.schemaname, _invalid.invalid_index_name, _index.schemaname, _index.indexrelname, _index.datname;
+        end if;
 
-      -- Drop the invalid _ccnew index
-      perform dblink(_index.datname, format('drop index concurrently %I.%I',
-        _index.schemaname, _index.indexrelname || '_ccnew'));
+        perform dblink_exec(_index.datname, format('drop index concurrently %I.%I',
+          _index.schemaname, _invalid.invalid_index_name));
 
-      -- Log the drop
-      raise warning 'The invalid index %.%_ccnew was dropped in database %',
-        _index.schemaname, _index.indexrelname, _index.datname;
+        raise warning 'The invalid index %.% was dropped in database %',
+          _index.schemaname, _invalid.invalid_index_name, _index.datname;
+      end loop;
+    exception when others then
+      raise warning 'Failed to clean invalid indexes for %.%.% in database %: %',
+        _index.schemaname, _index.relname, _index.indexrelname, _index.datname, sqlerrm;
+    end;
+
+    if not exists (
+      select 1
+      from leandex.reindex_history as h
+      where h.datname = _index.datname
+        and h.schemaname = _index.schemaname
+        and h.relname = _index.relname
+        and h.indexrelname = _index.indexrelname
+        and h.status = 'in_progress'
+    ) then
+      call leandex._clear_current_processed_index(_index.datname, _index.schemaname, _index.relname, _index.indexrelname);
     end if;
-
-    -- Clean up the current_processed_index record
-    delete from leandex.current_processed_index
-    where
-      datname = _index.datname and
-      schemaname = _index.schemaname and
-      relname = _index.relname and
-      indexrelname = _index.indexrelname;
   end loop;
 end;
 $body$

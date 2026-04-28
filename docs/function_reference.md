@@ -92,6 +92,17 @@ function leandex.set_or_replace_setting(
 ) returns void
 ```
 
+Common guardrail keys:
+
+- `allowed_start_windows` — JSON array of start windows. Gate only at start; a reindex already running may finish.
+- `min_window_remaining` — interval; reject starts too close to the end of an allowed window.
+- `max_parallel_reindexes` — default `1`; blocks concurrent starters per target DB.
+- `respect_external_index_activity` — default `true`; skip while other index builds/reindexes are active.
+- `lock_timeout` — default `30s`.
+- `idle_in_transaction_session_timeout` — default `1min`.
+- `idle_session_timeout` — default `0` on PG14+.
+- `statement_timeout` — always forced to `0` for reindex sessions.
+
 ### FDW and connection setup
 
 #### `leandex._connect_securely()`
@@ -134,6 +145,11 @@ select leandex.do_force_populate_index_stats('your_database', 'bot', null, null)
 When to use:
 - After initial registration, to establish best_ratio without reindexing.
 - After major data reshaping, to reset baseline for specific schemas/tables.
+
+Baseline metadata notes:
+- First observation is stored as `baseline_source='observed'` and `baseline_confidence='low'`.
+- After a successful reindex, metadata is upgraded to `baseline_source='post_reindex'` and `baseline_confidence='high'`.
+- `first_seen_at`, `last_seen_at`, and `last_seen_relfilenode` help distinguish an inherited observation from a rebuilt index.
 
 #### `leandex.check_environment()`
 Aggregated environment and installation self-check (PostgreSQL version, extensions, schema/tables, core routines presence).

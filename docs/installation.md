@@ -43,6 +43,7 @@ on conflict (database_name) do update
 select * from leandex.check_fdw_security_status();
 select * from leandex.check_environment();
 ```
+
 Notes:
 - The FDW host must be reachable from the database server itself, not just from your laptop. In Docker/CI it might be `postgres`; in self-hosted local setups it is often `127.0.0.1`.
 - For managed services ensure the admin user can `create database`, `create extension`, `create server`, and `create user mapping`.
