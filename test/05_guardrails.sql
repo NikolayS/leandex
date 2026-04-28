@@ -509,7 +509,35 @@ begin
   raise notice 'PASS: successful reindex upgrades baseline metadata';
 end $$;
 
--- 11. Cleanup.
+-- 11. Drop/recreate with the same index name must not inherit post_reindex/high confidence.
+do $$
+declare
+  _target_db text := test_guardrails_target_db();
+  _after record;
+begin
+  perform leandex._dblink_connect_if_not(_target_db::name);
+  perform dblink_exec(_target_db, 'drop index test_guardrails.idx_guardrails_email');
+  perform dblink_exec(_target_db, 'create index idx_guardrails_email on test_guardrails.guard_table(email)');
+  perform dblink_exec(_target_db, 'analyze test_guardrails.guard_table');
+
+  perform leandex._record_indexes_info(_target_db::name, 'test_guardrails', 'guard_table', 'idx_guardrails_email');
+
+  select baseline_source, baseline_confidence
+  into _after
+  from leandex.index_latest_state
+  where datname = _target_db::name
+    and schemaname = 'test_guardrails'
+    and indexrelname = 'idx_guardrails_email';
+
+  if _after.baseline_source <> 'observed' or _after.baseline_confidence <> 'low' then
+    raise exception 'FAIL: same-name recreated index inherited stale baseline trust: source=%, confidence=%',
+      _after.baseline_source, _after.baseline_confidence;
+  end if;
+
+  raise notice 'PASS: same-name recreated index resets baseline trust';
+end $$;
+
+-- 12. Cleanup.
 do $$
 declare
   _target_db text := test_guardrails_target_db();

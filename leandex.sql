@@ -256,7 +256,6 @@ create table leandex.current_processed_index (
 commit;
 
 
-
 -- leandex functions
 
 begin;
@@ -1032,7 +1031,7 @@ begin
   ),
   _previous_state as (
     select distinct on (datname, schemaname, relname, indexrelname)
-      datname, schemaname, relname, indexrelname,
+      datname, schemaname, relname, indexrelname, indexrelid,
       first_seen_at, last_seen_at, last_seen_relfilenode,
       baseline_source, baseline_confidence, best_ratio
     from leandex.index_latest_state
@@ -1084,7 +1083,8 @@ begin
     a.indisvalid,
     a.estimated_tuples,
     case
-      when exists (
+      when p.indexrelid is not null
+      and exists (
         select 1
         from leandex.reindex_history as h
         where h.status = 'completed'
@@ -1092,6 +1092,8 @@ begin
           and h.schemaname = a.schemaname
           and h.relname = a.relname
           and h.indexrelname = a.indexrelname
+          and h.indexrelid = p.indexrelid
+          and h.entry_timestamp >= p.last_seen_at
       )
       and a.indexsize > pg_size_bytes(leandex.get_setting(a.datname, a.schemaname, a.relname, a.indexrelname, 'minimum_reliable_index_size')) then
         a.indexsize::real / a.estimated_tuples::real
@@ -1100,11 +1102,9 @@ begin
       else
         null
     end as best_ratio,
-    coalesce(p.first_seen_at, now()),
-    now(),
-    a.relfilenode,
     case
-      when exists (
+      when p.indexrelid = a.indexrelid or (p.indexrelid is not null
+      and exists (
         select 1
         from leandex.reindex_history as h
         where h.status = 'completed'
@@ -1112,11 +1112,31 @@ begin
           and h.schemaname = a.schemaname
           and h.relname = a.relname
           and h.indexrelname = a.indexrelname
+          and h.indexrelid = p.indexrelid
+          and h.entry_timestamp >= p.last_seen_at
+      )) then coalesce(p.first_seen_at, now())
+      else now()
+    end,
+    now(),
+    a.relfilenode,
+    case
+      when p.indexrelid is not null
+      and exists (
+        select 1
+        from leandex.reindex_history as h
+        where h.status = 'completed'
+          and h.datname = a.datname
+          and h.schemaname = a.schemaname
+          and h.relname = a.relname
+          and h.indexrelname = a.indexrelname
+          and h.indexrelid = p.indexrelid
+          and h.entry_timestamp >= p.last_seen_at
       ) then 'post_reindex'
       else 'observed'
     end,
     case
-      when exists (
+      when p.indexrelid is not null
+      and exists (
         select 1
         from leandex.reindex_history as h
         where h.status = 'completed'
@@ -1124,6 +1144,8 @@ begin
           and h.schemaname = a.schemaname
           and h.relname = a.relname
           and h.indexrelname = a.indexrelname
+          and h.indexrelid = p.indexrelid
+          and h.entry_timestamp >= p.last_seen_at
       ) then 'high'
       else 'low'
     end
@@ -1154,6 +1176,8 @@ begin
             and h.schemaname = i.schemaname
             and h.relname = i.relname
             and h.indexrelname = i.indexrelname
+            and h.indexrelid = i.indexrelid
+            and h.entry_timestamp >= i.last_seen_at
         )
         and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size'))
         then excluded.indexsize::real / excluded.estimated_tuples::real
@@ -1176,6 +1200,8 @@ begin
             and h.schemaname = i.schemaname
             and h.relname = i.relname
             and h.indexrelname = i.indexrelname
+            and h.indexrelid = i.indexrelid
+            and h.entry_timestamp >= i.last_seen_at
         ) then 'post_reindex'
       when _force_populate then 'observed'
       else i.baseline_source
@@ -1189,6 +1215,8 @@ begin
             and h.schemaname = i.schemaname
             and h.relname = i.relname
             and h.indexrelname = i.indexrelname
+            and h.indexrelid = i.indexrelid
+            and h.entry_timestamp >= i.last_seen_at
         ) then 'high'
       when _force_populate then 'low'
       else i.baseline_confidence
@@ -1309,8 +1337,10 @@ create function leandex._record_reindex_history_event(
   _status text,
   _skip_reason text default null,
   _error_message text default null
-) returns void as
+) returns bigint as
 $body$
+declare
+  _history_id bigint;
 begin
   insert into leandex.reindex_history (
     datid,
@@ -1353,7 +1383,10 @@ begin
       and relname = _relname
       and indexrelname = _indexrelname
     order by datid, indexrelid, mtime desc
-  ) as latest;
+  ) as latest
+  returning id into _history_id;
+
+  return _history_id;
 end;
 $body$
 language plpgsql;
@@ -1880,6 +1913,7 @@ declare
   _max_parallel integer;
   _final_size bigint;
   _error_message text;
+  _history_id bigint;
 begin
   perform leandex._check_structure_version();
 
@@ -1987,7 +2021,7 @@ begin
       _index.indexrelname
     );
 
-    perform leandex._record_reindex_history_event(
+    _history_id := leandex._record_reindex_history_event(
       _index.datname,
       _index.schemaname,
       _index.relname,
@@ -1997,40 +2031,41 @@ begin
 
     commit;
 
-    _error_message := leandex._run_remote_reindex(
-      _index.datname,
-      _index.schemaname,
-      _index.relname,
-      _index.indexrelname
-    );
+    begin
+      _error_message := leandex._run_remote_reindex(
+        _index.datname,
+        _index.schemaname,
+        _index.relname,
+        _index.indexrelname
+      );
 
-    if _error_message is null then
-      select indexsize into _final_size
-      from leandex._remote_get_indexes_info(_index.datname, _index.schemaname, _index.relname, _index.indexrelname)
-      where indisvalid;
+      if _error_message is null then
+        select indexsize into _final_size
+        from leandex._remote_get_indexes_info(_index.datname, _index.schemaname, _index.relname, _index.indexrelname)
+        where indisvalid;
 
-      update leandex.reindex_history
-      set reindex_duration = clock_timestamp() - entry_timestamp,
-        status = 'completed',
-        indexsize_after = _final_size,
-        skip_reason = null,
-        error_message = null
-      where datname = _index.datname
-        and schemaname = _index.schemaname
-        and relname = _index.relname
-        and indexrelname = _index.indexrelname
-        and status = 'in_progress';
-    else
+        update leandex.reindex_history
+        set reindex_duration = clock_timestamp() - entry_timestamp,
+          status = 'completed',
+          indexsize_after = _final_size,
+          skip_reason = null,
+          error_message = null
+        where id = _history_id;
+      else
+        update leandex.reindex_history
+        set status = 'failed',
+          error_message = _error_message,
+          reindex_duration = clock_timestamp() - entry_timestamp
+        where id = _history_id;
+      end if;
+    exception when others then
       update leandex.reindex_history
       set status = 'failed',
-        error_message = _error_message,
+        error_message = sqlerrm,
         reindex_duration = clock_timestamp() - entry_timestamp
-      where datname = _index.datname
-        and schemaname = _index.schemaname
-        and relname = _index.relname
-        and indexrelname = _index.indexrelname
+      where id = _history_id
         and status = 'in_progress';
-    end if;
+    end;
 
     delete from leandex.current_processed_index
     where datname = _index.datname
@@ -2038,8 +2073,10 @@ begin
       and relname = _index.relname
       and indexrelname = _index.indexrelname;
 
-    commit;
     perform leandex._release_reindex_slot(_index.datname, _slot);
+    _slot := null;
+    _history_id := null;
+    commit;
   end loop;
 end;
 $body$
@@ -2119,38 +2156,46 @@ create procedure leandex._cleanup_our_not_valid_indexes() as
 $body$
 declare
   _index record;
+  _invalid record;
+  _base_name text;
 begin
   for _index in
-    select datname, schemaname, relname, indexrelname
+    select distinct datname, schemaname, relname, indexrelname
     from leandex.current_processed_index
+    union
+    select distinct datname, schemaname, relname, indexrelname
+    from leandex.reindex_history
+    where status = 'failed'
+      and entry_timestamp >= now() - interval '7 days'
   loop
-    -- Ensure we have a connection to the target database
     if dblink_get_connections() is null or not (_index.datname = any(dblink_get_connections())) then
       perform leandex._connect_securely(_index.datname);
     end if;
 
-    -- Check if the invalid _ccnew index exists
-    if exists (
-      select from dblink(_index.datname,
+    _base_name := _index.indexrelname || '_ccnew';
+
+    for _invalid in
+      select invalid_index_name
+      from dblink(_index.datname,
         format(
           $sql$
-            select x.indexrelid
+            select i.relname as invalid_index_name
             from pg_index x
             join pg_catalog.pg_class as c on c.oid = x.indrelid
             join pg_catalog.pg_class as i on i.oid = x.indexrelid
             join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-            where
-              n.nspname = %1$L
+            where n.nspname = %1$L
               and c.relname = %2$L
-              and i.relname = %3$L
               and not x.indisvalid
+              and left(i.relname, length(%3$L)) = %3$L
+              and substring(i.relname from length(%3$L) + 1) ~ '^[0-9]*$'
           $sql$,
           _index.schemaname,
           _index.relname,
-          _index.indexrelname || '_ccnew'
+          _base_name
         )
-      ) as _res(indexrelid oid))
-    then
+      ) as _res(invalid_index_name name)
+    loop
       if not exists (
         select from dblink(
           _index.datname,
@@ -2161,8 +2206,7 @@ begin
               join pg_catalog.pg_class as c on c.oid = x.indrelid
               join pg_catalog.pg_class as i on i.oid = x.indexrelid
               join pg_catalog.pg_namespace as n on n.oid = c.relnamespace
-              where
-                n.nspname = %1$L
+              where n.nspname = %1$L
                 and c.relname = %2$L
                 and i.relname = %3$L
             $sql$,
@@ -2172,27 +2216,22 @@ begin
           )
         ) as _res(indexrelid oid))
       then
-        -- Log the missing original index
-        raise warning 'The invalid index %.%_ccnew exists, but no original index %.% was found in database %',
-          _index.schemaname, _index.indexrelname, _index.schemaname, _index.indexrelname, _index.datname;
+        raise warning 'The invalid index %.% exists, but no original index %.% was found in database %',
+          _index.schemaname, _invalid.invalid_index_name, _index.schemaname, _index.indexrelname, _index.datname;
       end if;
 
-      -- Drop the invalid _ccnew index
-      perform dblink(_index.datname, format('drop index concurrently %I.%I',
-        _index.schemaname, _index.indexrelname || '_ccnew'));
+      perform dblink_exec(_index.datname, format('drop index concurrently %I.%I',
+        _index.schemaname, _invalid.invalid_index_name));
 
-      -- Log the drop
-      raise warning 'The invalid index %.%_ccnew was dropped in database %',
-        _index.schemaname, _index.indexrelname, _index.datname;
-    end if;
+      raise warning 'The invalid index %.% was dropped in database %',
+        _index.schemaname, _invalid.invalid_index_name, _index.datname;
+    end loop;
 
-    -- Clean up the current_processed_index record
     delete from leandex.current_processed_index
-    where
-      datname = _index.datname and
-      schemaname = _index.schemaname and
-      relname = _index.relname and
-      indexrelname = _index.indexrelname;
+    where datname = _index.datname
+      and schemaname = _index.schemaname
+      and relname = _index.relname
+      and indexrelname = _index.indexrelname;
   end loop;
 end;
 $body$
@@ -2360,7 +2399,6 @@ begin
 end $$;
 
 commit;
-
 
 
 -- leandex FDW and dblink helpers
