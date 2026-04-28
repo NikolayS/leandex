@@ -7,7 +7,7 @@
 
 Keep Postgres indexes lean: detect bloat, rebuild safely, and keep durable history of every reindex.
 
-`leandex` is a conservative autonomous reindexer written in pure SQL / PL-pgSQL. It installs into a separate control database and reaches target databases through `postgres_fdw` and `dblink`. It only ever runs `reindex index concurrently`, and it never installs anything into your application databases.
+`leandex` is a conservative autonomous reindexer written in pure SQL / PL/pgSQL. It installs into a separate control database and reaches target databases through `postgres_fdw` and `dblink`. It only ever runs `reindex index concurrently`, and it never installs anything into your application databases.
 
 ## Contents
 
