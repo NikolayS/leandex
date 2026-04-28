@@ -307,8 +307,13 @@ Important defaults:
 | `index_rebuild_scale_factor` | `2` | rebuild when estimated bloat exceeds 2x baseline |
 | `minimum_reliable_index_size` | `128kB` | avoid noisy estimates on tiny indexes |
 | `reindex_history_retention_period` | `10 years` | retain rebuild history |
-| `lock_timeout` | `5s` | remote lock wait guard before reindex |
-| `statement_timeout` | `0` | remote statement timeout; `0` disables it |
+| `lock_timeout` | `30s` | remote lock wait guard before reindex |
+| `idle_in_transaction_session_timeout` | `1min` | guard against abandoned remote transactions |
+| `idle_session_timeout` | `0` | disabled by default on PG14+ |
+| `statement_timeout` | `0` | always disabled for reindex sessions |
+| `max_parallel_reindexes` | `1` | one active reindex starter per target DB by default |
+| `respect_external_index_activity` | `true` | skip starts while external index work is active |
+| `min_window_remaining` | `0` | minimum remaining allowed-window time before start |
 
 Example:
 
@@ -461,6 +466,7 @@ Contributor workflow, local setup, tests, CI coverage, style, and PR expectation
 
 - [Installation](docs/installation.md)
 - [Runbook](docs/runbook.md)
+- [Large DB rollout](docs/large_db_rollout.md)
 - [FAQ](docs/faq.md)
 - [Function reference](docs/function_reference.md)
 - [Architecture](docs/architecture.md)
