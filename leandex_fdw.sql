@@ -55,6 +55,10 @@ begin
 
     -- Use user mapping via postgres_fdw: dblink_connect with server name (no plaintext passwords)
     perform dblink_connect(_datname, _fdw_server_name);
+    perform dblink_exec(
+      _datname,
+      format('set application_name = %L', format('leandex:%s', current_database()))
+    );
 
   exception when others then
     raise exception using

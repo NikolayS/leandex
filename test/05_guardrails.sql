@@ -24,6 +24,8 @@ begin
 end;
 $$ language plpgsql;
 
+select test_guardrails_target_db() as target_db \gset
+
 -- 1. Build test fixture and baseline state.
 do $$
 declare
@@ -116,9 +118,15 @@ begin
   );
 
   perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'allowed_start_windows', _window, 'test outside window');
+end $$;
 
-  call leandex.do_reindex(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
+call leandex.do_reindex(:'target_db', 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
 
+DO $$
+declare
+  _target_db text := test_guardrails_target_db();
+  _history record;
+begin
   select status, skip_reason into _history
   from leandex.reindex_history
   where datname = _target_db::name
@@ -245,11 +253,15 @@ begin
     raise exception 'FAIL: idle_in_transaction_session_timeout must be 1min, got %', _settings->>'idle_in_transaction_session_timeout';
   end if;
 
-  if _settings->>'idle_session_timeout' <> '0' then
-    raise exception 'FAIL: idle_session_timeout must be 0, got %', _settings->>'idle_session_timeout';
-  end if;
-
   _remote_version := (_settings->>'server_version_num')::int;
+
+  if _remote_version >= 140000 then
+    if _settings->>'idle_session_timeout' <> '0' then
+      raise exception 'FAIL: idle_session_timeout must be 0 on PG14+, got %', _settings->>'idle_session_timeout';
+    end if;
+  elsif _settings ? 'idle_session_timeout' and (_settings->>'idle_session_timeout') is not null then
+    raise exception 'FAIL: idle_session_timeout should not be set on PG13, got %', _settings->>'idle_session_timeout';
+  end if;
 
   if _remote_version >= 170000 then
     if _settings->>'transaction_timeout' <> '0' then
@@ -269,7 +281,6 @@ declare
   _sent int;
   _tries int := 0;
   _reason text;
-  _history record;
 begin
   perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'allowed_start_windows', null, 'clear window');
   perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'respect_external_index_activity', 'true', 'test override');
@@ -293,9 +304,15 @@ begin
     exit when _reason like 'external index activity:%' or _tries > 50;
     perform pg_sleep(0.1);
   end loop;
+end $$;
 
-  call leandex.do_reindex(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
+call leandex.do_reindex(:'target_db', 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
 
+DO $$
+declare
+  _target_db text := test_guardrails_target_db();
+  _history record;
+begin
   select status, skip_reason into _history
   from leandex.reindex_history
   where datname = _target_db::name
@@ -325,19 +342,22 @@ end $$;
 do $$
 declare
   _target_db text := test_guardrails_target_db();
-  _lock_key bigint;
+begin
+  insert into leandex.current_processed_index(datname, schemaname, relname, indexrelname)
+  values (_target_db::name, 'test_guardrails', 'guard_table', 'idx_guardrails_status');
+end $$;
+
+call leandex.do_reindex(:'target_db', 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
+
+DO $$
+declare
+  _target_db text := test_guardrails_target_db();
   _history record;
 begin
-  _lock_key := leandex._parallel_reindex_lock_key(_target_db::name, 1);
-  perform pg_advisory_lock(_lock_key);
-
-  begin
-    call leandex.do_reindex(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
-  exception when others then
-    perform pg_advisory_unlock(_lock_key);
-    raise;
-  end;
-  perform pg_advisory_unlock(_lock_key);
+  delete from leandex.current_processed_index
+  where datname = _target_db::name
+    and schemaname = 'test_guardrails'
+    and indexrelname = 'idx_guardrails_status';
 
   select status, skip_reason into _history
   from leandex.reindex_history
@@ -362,10 +382,11 @@ end $$;
 do $$
 declare
   _target_db text := test_guardrails_target_db();
-  _started timestamptz;
-  _elapsed interval;
-  _history record;
 begin
+  create temporary table if not exists test_guardrails_clock(started_at timestamptz) on commit preserve rows;
+  truncate test_guardrails_clock;
+  insert into test_guardrails_clock values (clock_timestamp());
+
   perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'lock_timeout', '200ms', 'test short timeout');
   if 'blocker' = any(coalesce(dblink_get_connections(), array[]::text[])) then
     perform dblink_disconnect('blocker');
@@ -373,12 +394,23 @@ begin
   perform dblink_connect('blocker', 'leandex_target');
   perform dblink_exec('blocker', 'begin isolation level repeatable read');
   perform dblink_exec('blocker', 'set local enable_seqscan = off');
-  perform dblink_exec('blocker', 'select count(*) from test_guardrails.guard_table where email >= ''user1@example.com''');
+  perform count
+  from dblink('blocker', 'select count(*) from test_guardrails.guard_table where email >= ''user1@example.com''') as t(count bigint);
   perform pg_sleep(0.3);
 
-  _started := clock_timestamp();
-  call leandex.do_reindex(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
-  _elapsed := clock_timestamp() - _started;
+  update test_guardrails_clock set started_at = clock_timestamp();
+end $$;
+
+call leandex.do_reindex(:'target_db', 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
+
+DO $$
+declare
+  _target_db text := test_guardrails_target_db();
+  _elapsed interval;
+  _history record;
+begin
+  select clock_timestamp() - started_at into _elapsed
+  from test_guardrails_clock;
 
   select status, skip_reason, error_message into _history
   from leandex.reindex_history
@@ -421,8 +453,10 @@ do $$
 declare
   _target_db text := test_guardrails_target_db();
   _before oid;
-  _after record;
 begin
+  create temporary table if not exists test_guardrails_relnode(before_relnode oid) on commit preserve rows;
+  truncate test_guardrails_relnode;
+
   perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'lock_timeout', '30s', 'restore default');
   perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'respect_external_index_activity', 'false', 'avoid false positives');
   perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'min_window_remaining', '0', 'test override');
@@ -434,8 +468,20 @@ begin
     and schemaname = 'test_guardrails'
     and indexrelname = 'idx_guardrails_email';
 
-  call leandex.do_reindex(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
+  insert into test_guardrails_relnode values (_before);
+end $$;
+
+call leandex.do_reindex(:'target_db', 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
+
+DO $$
+declare
+  _target_db text := test_guardrails_target_db();
+  _before oid;
+  _after record;
+begin
   perform leandex._record_indexes_info(_target_db::name, 'test_guardrails', 'guard_table', 'idx_guardrails_email');
+
+  select before_relnode into _before from test_guardrails_relnode;
 
   select baseline_source, baseline_confidence, last_seen_relfilenode, first_seen_at, last_seen_at
   into _after
