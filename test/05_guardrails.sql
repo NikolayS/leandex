@@ -338,26 +338,58 @@ begin
   raise notice 'PASS: external index activity guard works';
 end $$;
 
--- 8. max_parallel_reindexes should block a second starter.
+-- 8. max_parallel_reindexes should use advisory-lock truth, not stale tracking rows.
 do $$
 declare
   _target_db text := test_guardrails_target_db();
+  _host text;
+  _port integer;
+  _history record;
 begin
   insert into leandex.current_processed_index(datname, schemaname, relname, indexrelname)
   values (_target_db::name, 'test_guardrails', 'guard_table', 'idx_guardrails_status');
-end $$;
 
-call leandex.do_reindex(:'target_db', 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
+  call leandex.do_reindex(_target_db::name, 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
 
-DO $$
-declare
-  _target_db text := test_guardrails_target_db();
-  _history record;
-begin
+  select status, skip_reason into _history
+  from leandex.reindex_history
+  where datname = _target_db::name
+    and schemaname = 'test_guardrails'
+    and indexrelname = 'idx_guardrails_email'
+  order by id desc
+  limit 1;
+
+  if _history.status = 'skipped'
+    and _history.skip_reason like 'max_parallel_reindexes reached%' then
+    raise exception 'FAIL: stale current_processed_index row caused fake parallelism full state';
+  end if;
+
   delete from leandex.current_processed_index
   where datname = _target_db::name
     and schemaname = 'test_guardrails'
     and indexrelname = 'idx_guardrails_status';
+
+  select host, port into _host, _port
+  from leandex.target_databases
+  where database_name = _target_db::name;
+
+  if 'slot_blocker' = any(coalesce(dblink_get_connections(), array[]::text[])) then
+    perform dblink_disconnect('slot_blocker');
+  end if;
+
+  perform dblink_connect('slot_blocker', format('host=%s port=%s dbname=%s user=postgres password=postgres', _host, _port, current_database()));
+  perform dblink_exec('slot_blocker', format(
+    'do $block$ begin perform pg_advisory_lock(%s); end $block$',
+    leandex._parallel_reindex_lock_key(_target_db::name, 1)
+  ));
+
+  call leandex.do_reindex(_target_db::name, 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
+
+  perform dblink_exec('slot_blocker', format(
+    'do $block$ begin perform pg_advisory_unlock(%s); end $block$',
+    leandex._parallel_reindex_lock_key(_target_db::name, 1)
+  ));
+  perform dblink_disconnect('slot_blocker');
 
   select status, skip_reason into _history
   from leandex.reindex_history
@@ -368,17 +400,17 @@ begin
   limit 1;
 
   if _history.status <> 'skipped' then
-    raise exception 'FAIL: expected skipped when reindex slot busy, got %', _history.status;
+    raise exception 'FAIL: expected skipped when reindex advisory slot busy, got %', _history.status;
   end if;
 
   if _history.skip_reason not like 'max_parallel_reindexes reached%' then
     raise exception 'FAIL: unexpected parallelism reason: %', _history.skip_reason;
   end if;
 
-  raise notice 'PASS: max_parallel_reindexes guard works';
+  raise notice 'PASS: max_parallel_reindexes guard uses advisory-lock truth';
 end $$;
 
--- 9. Long ordinary readers should not be treated as REINDEX CONCURRENTLY blockers.
+-- 9. Old snapshots that may stall REINDEX CONCURRENTLY should be detected.
 do $$
 declare
   _target_db text := test_guardrails_target_db();
@@ -402,11 +434,11 @@ begin
   perform dblink_exec('blocker', 'rollback');
   perform dblink_disconnect('blocker');
 
-  if coalesce(_reason, '') like 'blocking transaction%' then
-    raise exception 'FAIL: ordinary long reader falsely detected as blocking transaction: %', _reason;
+  if coalesce(_reason, '') not like 'blocking transaction%' then
+    raise exception 'FAIL: old snapshot not detected as blocking transaction: %', _reason;
   end if;
 
-  raise notice 'PASS: ordinary long reader does not falsely block concurrent reindex';
+  raise notice 'PASS: old snapshot guard catches REINDEX CONCURRENTLY wait risk';
 end $$;
 
 -- 9b. Cleanup should not delete live current_processed_index rows.

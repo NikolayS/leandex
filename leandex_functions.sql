@@ -1490,12 +1490,22 @@ begin
           and coalesce(a.application_name, '') not like 'leandex:%%'
           and n.nspname = %2$L
           and c.relname in (%3$L, %4$L)
-          and l.mode in (
-            'ShareUpdateExclusiveLock',
-            'ShareLock',
-            'ShareRowExclusiveLock',
-            'ExclusiveLock',
-            'AccessExclusiveLock'
+          and (
+            l.mode in (
+              'ShareUpdateExclusiveLock',
+              'ShareLock',
+              'ShareRowExclusiveLock',
+              'ExclusiveLock',
+              'AccessExclusiveLock'
+            )
+            or (
+              a.backend_xmin is not null
+              and l.mode in (
+                'AccessShareLock',
+                'RowShareLock',
+                'RowExclusiveLock'
+              )
+            )
           )
         order by a.xact_start
         limit 1
@@ -1741,22 +1751,6 @@ begin
     end if;
 
     _max_parallel := greatest(coalesce(leandex.get_setting(_index.datname, _index.schemaname, _index.relname, _index.indexrelname, 'max_parallel_reindexes'), '1')::integer, 1);
-
-    if (
-      select count(*)
-      from leandex.current_processed_index
-      where datname = _index.datname
-    ) >= _max_parallel then
-      perform leandex._record_reindex_history_event(
-        _index.datname,
-        _index.schemaname,
-        _index.relname,
-        _index.indexrelname,
-        'skipped',
-        format('max_parallel_reindexes reached (limit=%s)', _max_parallel)
-      );
-      continue;
-    end if;
 
     _slot := leandex._try_acquire_reindex_slot(_index.datname, _max_parallel);
 
