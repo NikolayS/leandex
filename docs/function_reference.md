@@ -101,7 +101,7 @@ Internal helper that opens a dblink connection to a registered target database u
 function leandex._connect_securely(_datname name) returns void
 ```
 
-Normal users should prefer `./leandex register-target`, which creates the foreign server, user mapping, and `leandex.target_databases` entry.
+Create a `postgres_fdw` server, a current-user mapping, and a `leandex.target_databases` row from SQL; see `docs/installation.md` for a complete example.
 
 #### `leandex.check_fdw_security_status()`
 Checks FDW-related setup status.

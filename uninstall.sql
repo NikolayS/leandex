@@ -3,7 +3,7 @@
 -- WARNING: This deletes all collected statistics and history.
 --
 -- It intentionally does NOT drop postgres_fdw servers or user mappings.
--- Use `./leandex uninstall --drop-servers` if you also want to drop FDW servers
+-- Drop FDW servers separately only after confirming they are not shared infrastructure
 -- registered in leandex.target_databases.
 
 -- 1. Drop the schema cascade (this removes all leandex objects)
