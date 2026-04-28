@@ -24,6 +24,9 @@ call leandex.periodic(true);
 ```
 
 ### Scheduling with pg_cron
+
+`pg_cron` is not just another SQL schema. If it is not already enabled, it usually requires `shared_preload_libraries`, a Postgres restart, and on managed services a parameter-group / extension-allowlist change. Confirm this before promising in-database scheduling. If `cron.database_name` is not the control database, connect to the pg_cron database and use `cron.schedule_in_database(...)` to run the job in the control DB.
+
 ```sql
 -- Identify pg_cron database
 show cron.database_name;        -- connect to that DB before scheduling
@@ -43,20 +46,26 @@ select cron.unschedule('leandex_daily');  -- disable
 
 ### pg_cron log hygiene
 
-`pg_cron` writes one row to `cron.job_run_details` per job execution and never purges that table. `leandex`'s own schedule is small (a handful of runs per day), so its contribution is negligible — but if you share the cron instance with high-frequency tickers, the table grows fast.
+`pg_cron` writes one row to `cron.job_run_details` per job execution and does not purge that table. A normal `leandex` schedule is small, but shared cron instances with high-frequency jobs can grow this table quickly.
 
-Recommended: disable `cron.log_run`. Errors from failed jobs still appear in the Postgres server log (`cron.log_min_messages` defaults to `WARNING`) — you lose nothing important, only the `job_run_details` table entries.
+If you do **not** rely on `cron.job_run_details` as an audit trail, you can disable run-detail logging. This is cluster-wide, requires high privileges, and is often controlled through managed-service parameter groups / flags rather than direct SQL:
 
 ```sql
 alter system set cron.log_run = off;  -- requires Postgres restart (postmaster context)
 ```
 
-If other jobs on this instance need run history, schedule periodic cleanup instead:
+If you want to keep recent run history, schedule cleanup instead. This is often the safer default:
 
 ```sql
-delete from cron.job_run_details
-where end_time < now() - interval '7 days';
+select cron.schedule(
+  'pg-cron-job-run-details-cleanup',
+  '15 4 * * *',
+  $$delete from cron.job_run_details
+    where end_time < now() - interval '7 days'$$
+);
 ```
+
+Choose one policy deliberately; do not let `cron.job_run_details` grow forever by accident.
 
 ### Scheduling with external schedulers
 
@@ -205,7 +214,8 @@ select * from dblink('<db>', 'select pg_terminate_backend(<pid>)') as t(ok boole
 -- Auto-clean invalid _ccnew indexes left from failures
 call leandex._cleanup_our_not_valid_indexes();
 
--- List remaining invalid _ccnew indexes (manual review)
+-- List remaining invalid _ccnew indexes (manual review).
+-- Run this on the target DB, not the leandex control DB.
 select n.nspname, i.relname
 from pg_index idx
 join pg_class i on i.oid = idx.indexrelid

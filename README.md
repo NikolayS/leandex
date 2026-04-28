@@ -3,65 +3,96 @@
 [![CI](https://github.com/NikolayS/leandex/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/leandex/actions/workflows/ci.yml)
 [![Postgres 13-18](https://img.shields.io/badge/Postgres-13--18-336791?logo=postgresql&logoColor=white)](https://github.com/NikolayS/leandex)
 [![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
-[![Anti-extension](https://img.shields.io/badge/Anti--extension-control_plane-green)](#why-anti-extension)
+[![Anti-extension](https://img.shields.io/badge/Anti--extension-control_plane-green)](https://github.com/NikolayS/leandex)
 
-Keep Postgres indexes lean: detect bloat, rebuild safely, and keep durable history of every reindex.
+Keep Postgres indexes lean: detect bloat, rebuild safely, and keep a durable history of reindexing.
 
-`leandex` is a conservative autonomous reindexer written in pure SQL / PL/pgSQL. It installs into a separate control database and reaches target databases through `postgres_fdw` and `dblink`. It only ever runs `reindex index concurrently`, and it never installs anything into your application databases.
+**The anti-extension, anti-daemon path for index maintenance.** `leandex` is a pure SQL / PL/pgSQL control plane for conservative autonomous reindexing, in the same extension-avoidance spirit as [`pg_ash`](https://github.com/NikolayS/pg_ash) and [`PgQue`](https://github.com/NikolayS/pgque). It installs into a separate control database, talks to target databases through `postgres_fdw` user mappings and `dblink`, and rebuilds only with `reindex index concurrently`. For leandex itself: no schema in target databases, no C extension, no sidecar worker, no new background worker, no restart.
+
+The production target is deliberately narrow: **safe automatic reindexing**. `leandex` does not drop indexes and does not suggest new indexes.
 
 ## Contents
 
-- [Why "anti-extension"](#why-anti-extension)
+- [Why leandex](#why-leandex)
+- [Why anti-extension](#why-anti-extension)
 - [What leandex does](#what-leandex-does)
 - [What leandex refuses to do](#what-leandex-refuses-to-do)
 - [Quick start](#quick-start)
 - [First dry run](#first-dry-run)
 - [Safety model](#safety-model)
+- [Comparison](#comparison)
 - [How it works](#how-it-works)
 - [Configuration](#configuration)
 - [Scheduling](#scheduling)
-- [Comparison](#comparison)
+- [Operations cookbook](#operations-cookbook)
+- [Managed Postgres notes](#managed-postgres-notes)
+- [Acknowledgements](#acknowledgements)
+- [Repository layout](#repository-layout)
+- [Contributing](#contributing)
 - [Documentation](#documentation)
+- [Uninstall](#uninstall)
+- [Status](#status)
 - [License](#license)
 
-## Why "anti-extension"
+## Why leandex
 
-The reason is portability. A new C extension only helps the people whose Postgres provider has agreed to ship it. On RDS, Aurora, Cloud SQL, Azure, Supabase, Crunchy Bridge, and most managed platforms, that decision is not yours, the timeline is not yours, and historically it can take years — or never happen at all.
+Index bloat is boring until it quietly taxes every expensive part of Postgres: buffer cache, storage, IO, backup size, replica lag, failover time, and maintenance windows. Manual reindexing works for one database. It does not scale across fleets. Naive automation is worse: it can block application traffic, forget history, reindex the wrong thing, or hide what it did.
 
-`leandex` sidesteps that loop entirely. It only depends on building blocks that are already available virtually everywhere Postgres runs:
+`leandex` is the conservative middle ground:
 
-- `postgres_fdw` and `dblink` — standard contrib extensions, allow-listed by every major managed provider;
-- `pg_cron` for scheduling where it's available, or any external ticker (system cron, Kubernetes CronJob, GitHub Actions, Lambda, …) where it isn't;
-- the `reindex index concurrently` command, built into Postgres since 12.
+- find indexes whose size drifted far above their baseline;
+- rebuild them with Postgres' concurrent reindex machinery;
+- keep durable state and history in Postgres;
+- let operators inspect, dry-run, pause, schedule, and audit the whole thing.
 
-That means no waiting on a vendor to support a new extension, no `shared_preload_libraries` change, no Postgres restart, no background worker or sidecar daemon, and nothing installed inside your application databases. Just a single SQL file loaded once into one isolated control database, and a role with enough privileges to reindex on the targets.
+This is DBA automation, not a magic index advisor. It automates the maintenance task that should be boring, and it leaves the sharp product decisions to humans and separately gated tools.
 
-This is the same posture as [`pg_ash`](https://github.com/NikolayS/pg_ash) and [`PgQue`](https://github.com/NikolayS/pgque): build on what's already in the box, so the tool runs wherever your databases run.
+## Why anti-extension
+
+The point is portability, not ideology. A new C extension only helps after each Postgres provider agrees to ship it, and that timeline is not controlled by the user. `leandex` stays in the control plane instead: one SQL file in a separate database, with target access through `postgres_fdw` user mappings and `dblink`.
+
+That avoids installing schemas or functions into application databases, avoids a custom C extension, avoids a sidecar daemon, and avoids a new background worker. It also means the deployment story is closer to [`pg_ash`](https://github.com/NikolayS/pg_ash) and [`PgQue`](https://github.com/NikolayS/pgque): build on components many Postgres environments already have.
+
+This does **not** mean every managed provider is automatically certified. `postgres_fdw`, `dblink`, privileges, network reachability, and scheduling policy still need to be validated per environment. See [Managed Postgres notes](#managed-postgres-notes).
 
 ## What leandex does
 
-- Detects index bloat by comparing current bytes-per-tuple against the smallest ratio ever observed for that index.
+- Detects index bloat with a lightweight baseline-ratio method: current bytes-per-tuple compared to the smallest ratio observed for that index.
 - Rebuilds eligible indexes using `reindex index concurrently`.
-- Records every attempt in `leandex.reindex_history` and the latest state in `leandex.index_latest_state`.
-- Manages many target databases from one control database.
+- Stores latest observed index state in `leandex.index_latest_state`.
+- Stores every rebuild attempt in `leandex.reindex_history`.
+- Runs from a separate control database, typically `leandex_control`.
+- Supports multiple target databases from one control database.
 - Uses `postgres_fdw` user mappings instead of plaintext dblink connection strings.
-- Schedules with `pg_cron` or any external scheduler.
+- Can be scheduled with `pg_cron` or any external scheduler.
+- Works without installing schemas, tables, or functions into target databases.
 
 ## What leandex refuses to do
 
-`leandex` does **not** drop indexes, suggest missing indexes, create replacement indexes, or rewrite table storage. Index creation and deletion are sharp knives; mixing them into automatic reindexing would muddy the safety story. The production target is deliberately narrow: **safe automatic reindexing**.
+`leandex` does **not**:
+
+- drop indexes;
+- suggest missing indexes;
+- create replacement indexes;
+- rewrite table storage;
+- require superuser-only C extensions;
+- install anything into target application databases.
+
+That separation is intentional. Index creation and deletion are sharp knives. Mixing them into automatic reindexing would make the safety story muddy.
 
 ## Quick start
 
 Requirements:
 
-- Postgres 13–18 (CI matrix; PG 14.0–14.3 are rejected at install time, see [Failure handling and current limits](#failure-handling-and-current-limits))
-- A control database (for example `leandex_control`)
-- `postgres_fdw` and `dblink` installed in the control database
-- `pg_cron` in the control database — **strongly recommended** as the scheduler. Optional only in the sense that you can drive `call leandex.periodic(true);` from any external ticker (system cron, Kubernetes CronJob, Lambda, etc.) if `pg_cron` is unavailable.
-- A control-database role with `CREATE` on the control database and `SELECT` on `pg_stat_user_indexes`. The FDW user mapping must point to a target-database role that owns the indexes (or has `pg_has_role(owner, 'usage')`) so it can run `REINDEX INDEX CONCURRENTLY` on them. No superuser, no `SECURITY DEFINER`.
+- Postgres 13 or newer.
+- A control database, for example `leandex_control`.
+- Extensions in the control database:
+  - `postgres_fdw`
+  - `dblink`
+  - `pg_cron` optional, only for in-database scheduling.
+- A role with enough privileges on target databases to inspect indexes and run `reindex index concurrently` on target indexes.
 
-Install:
+Install and register one target:
 
 ```bash
 git clone https://github.com/NikolayS/leandex.git
@@ -71,15 +102,15 @@ createdb -h your_host -U your_user leandex_control
 psql -h your_host -U your_user -d leandex_control
 ```
 
+Inside `psql`, install the single-file schema:
+
 ```sql
 create extension if not exists postgres_fdw;
 create extension if not exists dblink;
 \i leandex.sql
 ```
 
-A note before you paste the next snippet: connect to the control database using `~/.pgpass` (`chmod 600`) rather than `PGPASSWORD=…` on the command line — the latter leaks through shell history and process listings. The target-database password does belong inside the FDW user mapping (non-superusers can't use `.pgpass` for FDW connections); options stored there are not exposed in `pg_user_mappings`, only to the mapping owner via `pg_user_mapping`.
-
-Register one target:
+Create the FDW server, user mapping, and target registration from the same `psql` session:
 
 ```sql
 create server target_your_database
@@ -93,80 +124,144 @@ create user mapping for current_user
 insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
 values ('your_database', 'your_host', 5432, 'target_your_database', true)
 on conflict (database_name) do update
-  set host = excluded.host,
-      port = excluded.port,
-      fdw_server_name = excluded.fdw_server_name,
-      enabled = true;
+  set
+    host = excluded.host,
+    port = excluded.port,
+    fdw_server_name = excluded.fdw_server_name,
+    enabled = true;
 ```
 
-Verify:
+Verify from SQL:
 
 ```sql
 select * from leandex.check_fdw_security_status();
 select * from leandex.check_environment();
 ```
 
-`leandex.sql` is the installation artifact. The split SQL files at the repository root exist for reviewable diffs during development.
+Expected verification signals include:
+
+```text
+Overall security status | SECURE
+Control DB: registered targets | t | your_database
+FDW self-connection test | t | Connected via user mapping
+```
+
+Prefer `.pgpass`, `PGPASSWORD`, or a protected secret store over command-line passwords. Command-line passwords leak through shell history and process listings. Ask me how I know. Actually, don't.
+
+### Single-file SQL install
+
+Use `psql` directly:
+
+```bash
+createdb -h your_host -U your_user leandex_control
+psql -h your_host -U your_user -d leandex_control
+```
+
+Then from `psql`:
+
+```sql
+create extension if not exists postgres_fdw;
+create extension if not exists dblink;
+\i leandex.sql
+```
+
+`leandex.sql` is the installation artifact. The split SQL files are for development and reviewable diffs.
 
 ## First dry run
 
-Don't point a new automation loop at a hot production fleet and walk away.
+Start with inventory and dry-run behavior. Do not point a new automation loop at a hot production fleet and walk away. That is how dashboards become campfire stories.
 
-Populate baseline state without rebuilding. `do_force_populate_index_stats` snapshots index sizes and tuple counts into `index_latest_state` so subsequent runs have a baseline to compare against; "force" here just means "ignore the size threshold and record everything in scope":
+Populate index state without rebuilding:
 
 ```sql
 select leandex.do_force_populate_index_stats('appdb', 'public', null, null);
 ```
 
-Inspect estimated bloat:
+Check estimated bloat:
 
 ```sql
-select datname, schemaname, relname, indexrelname,
-       pg_size_pretty(indexsize) as index_size,
-       estimated_bloat
+select
+  datname,
+  schemaname,
+  relname,
+  indexrelname,
+  pg_size_pretty(indexsize) as index_size,
+  estimated_bloat
 from leandex.get_index_bloat_estimates('appdb')
 order by estimated_bloat desc
 limit 20;
 ```
 
-Dry run (no rebuilds), then a real run:
+Run one maintenance cycle in dry-run mode (`false` means do not rebuild):
 
 ```sql
 call leandex.periodic(false);
+```
+
+Run one maintenance cycle that may rebuild eligible indexes:
+
+```sql
 call leandex.periodic(true);
 ```
 
-Review history:
+View history:
 
 ```sql
-select * from leandex.history order by ts desc limit 20;
+select *
+from leandex.history
+order by ts desc
+limit 20;
 ```
 
 ## Safety model
 
-| Area | Approach |
+| Area | Current approach |
 | --- | --- |
 | Rebuild method | `reindex index concurrently` only |
-| Control plane | separate control database |
-| Target DB footprint | nothing installed in target DBs |
-| Credentials | `postgres_fdw` user mappings |
-| Scope | reindex only — no drop, create, or advice |
-| Timeouts | remote `lock_timeout` / `statement_timeout` set before reindex |
-| History | every attempt recorded in `leandex.reindex_history` |
-| Compatibility | Postgres 13–18 in CI; PG 14.0–14.3 blocked, other affected minors warn |
-| Uninstall | drops the `leandex` schema; FDW cleanup is opt-in |
+| Control plane | separate control database, usually `leandex_control` |
+| Target DB footprint | no schema installed in target DBs |
+| Credentials | `postgres_fdw` user mappings; no plaintext dblink connection strings |
+| Scope | reindexing only; no drop/create/index advice |
+| Locking | orchestration runs outside target DB transaction context |
+| Timeouts | remote `lock_timeout` and `statement_timeout` are set before reindex |
+| History | every attempt is recorded in `leandex.reindex_history` |
+| Compatibility | Postgres 13 through 18 in CI; known unsafe minor releases are blocked |
+| Uninstall | drops the `leandex` schema by default; FDW server cleanup is opt-in |
 
-What can still go wrong: `reindex index concurrently` still consumes IO, CPU, WAL, and temp disk; long transactions on the target delay it; aggressive thresholds can schedule more rebuild work than your maintenance window can absorb. And if you haven't tested restore, you don't have backups — that one's gravity, not `leandex`.
+What can still go wrong:
 
-### Failure handling and current limits
+- `reindex index concurrently` still consumes IO, CPU, WAL, and temporary disk.
+- Long transactions on the target database can delay concurrent reindexing.
+- Bad privileges or FDW mappings stop the control plane from connecting.
+- A too-aggressive threshold can schedule more rebuild work than your maintenance window can absorb.
+- If you have not tested backups and restores, you do not have backups. This is not a leandex problem; this is gravity.
 
-- **Failed or cancelled `REINDEX CONCURRENTLY` leaves an `INVALID` `*_ccnew` index behind.** `leandex` automatically detects these at the start of each `periodic()` run and drops them with `DROP INDEX CONCURRENTLY`, so they don't accumulate. Look for warnings in the run log if cleanup fired.
-- **No automatic retry.** A failed rebuild is recorded in `leandex.reindex_history` with `status = 'failed'` and the error message, and that's it. The next `periodic()` run reassesses bloat from scratch and may pick the index up again on its own.
-- **`statement_timeout` defaults to `0` (disabled).** That mirrors Postgres's own default, but for a long-running rebuild it means no upper bound. In production, set a per-database `statement_timeout` you're willing to live with via `leandex.set_or_replace_setting`.
-- **Partitioned indexes are not yet walked.** Index discovery filters on `relkind in ('r','m')`, so partitioned-table indexes (`relkind = 'I'`) and their child indexes are currently skipped. Reindex partitioned indexes manually for now, or register the partitions as plain tables if appropriate.
-- **Postgres version safety.** PG 13+ is required. PG 14.0–14.3 are blocked outright at install time (Postgres bug #17485 corrupts indexes under concurrent reindex). Other minor versions known to be affected raise a `WARNING` at install with the recommended upgrade target.
+Recommended rollout:
 
-Recommended rollout: install, register one non-critical target, populate baseline, run `call leandex.periodic(false);` and inspect, lower thresholds in staging before production, then schedule.
+1. Install in a control database.
+2. Register one non-critical target database.
+3. Populate baseline state.
+4. Run `call leandex.periodic(false);` and inspect candidates.
+5. Lower thresholds only in test or staging first.
+6. Schedule production runs after you know the volume of rebuild work.
+
+## Comparison
+
+| Tool / approach | Detects bloat | Rebuilds concurrently | Keeps history | Multi-DB control plane | Managed Postgres friendly | No target DB objects | Drops/suggests indexes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| manual SQL scripts | yes | if careful | no | no | yes | yes | manual |
+| custom cron scripts | maybe | if careful | usually no | usually no | yes | yes | custom risk |
+| `pg_repack` | partial | yes | no | no | often blocked by permissions / extension policy | no | no |
+| `pgstattuple` checks | yes | no | no | no | often restricted | no | no |
+| postgres-checkup | yes | no | report-oriented | external report | yes | yes | no |
+| leandex | yes | yes | yes | yes | designed for it | yes | no |
+
+Notes:
+
+- `pg_repack` is excellent when it is available and when you need table-level rewrite capabilities. Many managed environments make it awkward or impossible.
+- `pgstattuple` can provide direct bloat measurements, but it is an extension dependency and not an automation framework.
+- postgres-checkup is for health analysis and reporting; leandex is for controlled execution of one maintenance action.
+- leandex intentionally avoids index recommendations. That belongs in a separate review-heavy workflow.
 
 ## How it works
 
@@ -196,42 +291,46 @@ graph TB
     funcs --> state
 ```
 
-The control database is intentional: `reindex concurrently` cannot run inside a normal transaction block, and orchestrating from the database being reindexed is a fine way to manufacture deadlocks at 3am. Indexes are processed serially, one per target database per `periodic()` call.
+The control database is intentional. `reindex concurrently` cannot run inside a normal transaction block, and running orchestration from the same database being reindexed is a fine way to manufacture deadlocks at 3am.
 
-See [docs/architecture.md](docs/architecture.md) for the full loop.
+The high-level loop:
 
-### How bloat is detected
+1. `leandex.target_databases` lists enabled target databases and FDW servers.
+2. `postgres_fdw` user mappings hold connection credentials.
+3. `dblink_connect()` opens target connections through FDW server names.
+4. leandex reads target catalog/index state remotely.
+5. leandex compares current index size per tuple against stored baseline state.
+6. eligible indexes are rebuilt with `reindex index concurrently`.
+7. latest state and history are updated in the control database.
 
-For every tracked index, `leandex` records its **bytes-per-tuple ratio** (`pg_relation_size(index) / pg_class.reltuples`) and keeps the *smallest ratio it has ever seen* in `leandex.index_latest_state.best_ratio`. That value is the per-index baseline — it is only ever updated downward, so a fresh `REINDEX` resets it to a tighter floor.
-
-An index's bloat estimate is then:
-
-```
-estimated_bloat = current_indexsize / (best_ratio × estimated_tuples)
-```
-
-A rebuild is triggered when `estimated_bloat ≥ index_rebuild_scale_factor` (default `2.0`, i.e. the index has roughly doubled in size for the same tuple count). The approach is based on Maxim Boguk's formula from [`pg_index_watch`](https://github.com/dataegret/pg_index_watch); it is a deliberately lightweight heuristic, not a page-level forensic measurement (`pgstattuple` territory). The trade-off is intentional: leandex avoids `pgstattuple`'s extension dependency and IO cost in exchange for needing a few baseline observations before the first useful decision.
+The current bloat heuristic is intentionally simple: a baseline-ratio method based on observed index size and estimated tuples. It is not a page-level forensic bloat calculator. The goal is safe, repeatable maintenance decisions, not a PhD thesis in tuple archaeology.
 
 ## Configuration
 
-Settings live in `leandex.config`, scoped globally or per database / schema / table / index.
+Settings live in `leandex.config` and can be scoped globally, by database, schema, table, or index.
+
+Important defaults:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `index_size_threshold` | `10MB` | ignore smaller indexes unless forced by history |
-| `index_rebuild_scale_factor` | `2` | rebuild when estimated bloat exceeds 2× baseline |
+| `index_size_threshold` | `10MB` | ignore indexes smaller than this unless forced by history |
+| `index_rebuild_scale_factor` | `2` | rebuild when estimated bloat exceeds 2x baseline |
 | `minimum_reliable_index_size` | `128kB` | avoid noisy estimates on tiny indexes |
-| `reindex_history_retention_period` | `10 years` | how long to keep history |
-| `lock_timeout` | `5s` | remote lock-wait guard before reindex |
-| `statement_timeout` | `0` | remote statement timeout; `0` disables — set explicitly in production |
+| `reindex_history_retention_period` | `10 years` | retain rebuild history |
+| `lock_timeout` | `5s` | remote lock wait guard before reindex |
+| `statement_timeout` | `0` | remote statement timeout; `0` disables it |
+
+Example:
 
 ```sql
 select leandex.set_or_replace_setting(
   _datname => 'appdb',
-  _schemaname => null, _relname => null, _indexrelname => null,
+  _schemaname => null,
+  _relname => null,
+  _indexrelname => null,
   _key => 'index_rebuild_scale_factor',
   _value => '1.3',
-  _comment => 'Rebuild at 30% above baseline'
+  _comment => 'Rebuild when index size per tuple grows 30% above baseline'
 );
 ```
 
@@ -239,7 +338,10 @@ select leandex.set_or_replace_setting(
 
 With `pg_cron`:
 
+> `pg_cron` may require `shared_preload_libraries` and a Postgres restart / managed-service parameter group change if it is not already enabled. It can also live outside the control database; connect to the pg_cron database (`show cron.database_name`) and use `cron.schedule_in_database(...)` to target `leandex_control`.
+
 ```sql
+-- Run this from the database where pg_cron is installed.
 select cron.schedule_in_database(
   'leandex-maintenance',
   '0 3 * * *',
@@ -248,7 +350,7 @@ select cron.schedule_in_database(
 );
 ```
 
-With external cron (credentials via `~/.pgpass` on the scheduler host, mode `0600`):
+With external cron:
 
 ```bash
 psql -h your_host -U your_user -d leandex_control \
@@ -256,30 +358,145 @@ psql -h your_host -U your_user -d leandex_control \
   -c "call leandex.periodic(true);"
 ```
 
-Start with `periodic(false)` until candidates look sane, run during a real maintenance window, watch WAL, replica lag, IO, and lock waits, and expand scope gradually. To pause everything globally, set `skip_index_rebuild` to `true`. If you're sharing `pg_cron` with high-frequency tickers, also disable `cron.log_run` — see [docs/runbook.md](docs/runbook.md) for both recipes.
+Use `~/.pgpass` on the scheduler host (`0600`) or a protected secret store; do not put passwords in the command line.
 
-## Comparison
+Scheduling advice:
 
-| Tool | Concurrent rebuild | History | Multi-DB | No target-DB objects | Managed-PG friendly |
-| --- | :---: | :---: | :---: | :---: | :---: |
-| manual SQL / cron scripts | if careful | usually no | no | yes | yes |
-| `pg_repack` | yes | no | no | no | often blocked |
-| `pgstattuple` | n/a (measurement) | no | no | no | often restricted |
-| postgres-checkup | n/a (reporting) | report | external | yes | yes |
-| **leandex** | **yes** | **yes** | **yes** | **yes** | **designed for it** |
+- start with `call leandex.periodic(false);` until candidates look sane;
+- run during a real maintenance window at first;
+- monitor WAL generation, replica lag, IO, and lock waits;
+- keep `lock_timeout` short unless you have a reason to wait;
+- increase scope gradually across databases.
 
-`pg_repack` is excellent when available and when you need table rewrites; many managed environments make it awkward or impossible. `pgstattuple` is a measurement tool, not an automation framework. postgres-checkup is for analysis and reporting. `leandex` does one execution-side job and intentionally avoids index recommendations.
+## Operations cookbook
+
+Pause all automatic rebuilds:
+
+```sql
+select leandex.set_or_replace_setting(
+  null, null, null, null,
+  'skip', 'true',
+  'pause all leandex rebuilds'
+);
+```
+
+Resume rebuilds:
+
+```sql
+select leandex.set_or_replace_setting(
+  null, null, null, null,
+  'skip', 'false',
+  'resume leandex rebuilds'
+);
+```
+
+Force a fresh snapshot for one schema:
+
+```sql
+select leandex.do_force_populate_index_stats('appdb', 'public', null, null);
+```
+
+Check failed or skipped rebuilds:
+
+```sql
+select *
+from leandex.reindex_history
+where status <> 'done'
+order by entry_timestamp desc
+limit 50;
+```
+
+Check recent successful rebuilds:
+
+```sql
+select
+  datname,
+  schemaname,
+  relname,
+  indexrelname,
+  pg_size_pretty(indexsize_before) as before,
+  pg_size_pretty(indexsize_after) as after,
+  reindex_duration,
+  entry_timestamp
+from leandex.reindex_history
+where status = 'done'
+order by entry_timestamp desc
+limit 20;
+```
+
+Review leftover invalid `_ccnew` indexes manually on each target database:
+
+```sql
+-- Run on the target DB, not the leandex control DB.
+select n.nspname, i.relname
+from pg_index as idx
+join pg_class as i on i.oid = idx.indexrelid
+join pg_namespace as n on n.oid = i.relnamespace
+where i.relname ~ '_ccnew[0-9]*$'
+  and not idx.indisvalid;
+```
+
+## Managed Postgres notes
+
+| Provider | Expected status | Notes |
+| --- | --- | --- |
+| RDS / Aurora PostgreSQL | likely | `postgres_fdw` and `dblink` are commonly available; privileges still matter |
+| Supabase | likely | validate role privileges and extension availability in the target project |
+| Cloud SQL | needs validation | extension and role behavior need dedicated testing |
+| Azure Database for PostgreSQL | needs validation | extension and role behavior need dedicated testing |
+| Crunchy Bridge | needs validation | likely feasible, but do not brag without a real run |
+| Self-managed Postgres | yes | easiest path; you control extensions and roles |
+
+Managed provider support is not just “does the extension exist?” The role must also be able to read catalog/statistics data, create FDW user mappings in the control database, and run `reindex index concurrently` on target indexes.
+
+## Acknowledgements
+
+The bloat detection approach in leandex is based on Maxim Boguk's index bloat formula, originally implemented in `pg_index_watch`. That idea is the core reason leandex can use a lightweight baseline-ratio method instead of heavy table scans or narrow btree-only estimates.
+
+## Repository layout
+
+```text
+.
+├── leandex.sql             # single-file SQL installer
+├── leandex_tables.sql      # split SQL: schema and tables
+├── leandex_functions.sql   # split SQL: core logic
+├── leandex_fdw.sql         # split SQL: FDW/dblink helpers
+├── uninstall.sql
+├── docs/
+├── test/
+└── ci/
+```
+
+`leandex.sql` is the user-facing installer. The split SQL files stay at repository root for reviewable diffs and development.
+
+## Contributing
+
+Contributor workflow, local setup, tests, CI coverage, style, and PR expectations live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
 - [Installation](docs/installation.md)
-- [Runbook](docs/runbook.md) — pause/resume, troubleshooting, history queries
+- [Runbook](docs/runbook.md)
 - [FAQ](docs/faq.md)
 - [Function reference](docs/function_reference.md)
 - [Architecture](docs/architecture.md)
 - [Contributing](CONTRIBUTING.md)
 
-To uninstall, run `\i uninstall.sql` in the control database. It drops the `leandex` schema and intentionally leaves FDW servers and user mappings alone — those may be shared infrastructure.
+## Uninstall
+
+Drop only the leandex schema from the control database:
+
+```sql
+\i uninstall.sql
+```
+
+`uninstall.sql` intentionally leaves FDW servers and user mappings alone. Shared FDW objects are infrastructure; dropping them by surprise is how tooling loses friends. Drop FDW servers separately only when you are sure they are not shared.
+
+## Status
+
+Early development. Useful for experiments and controlled environments; not yet a fire-and-forget production daemon.
+
+The SQL schema is `leandex`; the original extraction intentionally did a full rename while the project was still pre-adoption.
 
 ## License
 
