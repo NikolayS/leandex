@@ -58,7 +58,8 @@ Requirements:
 
 - Postgres 13+
 - A control database (for example `leandex_control`)
-- `postgres_fdw` and `dblink` installed in the control database (`pg_cron` optional, for in-database scheduling)
+- `postgres_fdw` and `dblink` installed in the control database
+- `pg_cron` in the control database — **strongly recommended** as the scheduler. Optional only in the sense that you can drive `call leandex.periodic(true);` from any external ticker (system cron, Kubernetes CronJob, Lambda, etc.) if `pg_cron` is unavailable.
 - A role with privileges to inspect indexes and run `reindex index concurrently` on targets
 
 Install:
