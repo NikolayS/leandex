@@ -2,12 +2,12 @@
 
 [![CI](https://github.com/NikolayS/leandex/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolayS/leandex/actions/workflows/ci.yml)
 [![Postgres 13-18](https://img.shields.io/badge/Postgres-13--18-336791?logo=postgresql&logoColor=white)](https://github.com/NikolayS/leandex)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Pure SQL](https://img.shields.io/badge/Pure_SQL-control_plane-green)](https://github.com/NikolayS/leandex)
+[![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
+[![Anti-extension](https://img.shields.io/badge/Anti--extension-control_plane-green)](https://github.com/NikolayS/leandex)
 
 Keep Postgres indexes lean: detect bloat, rebuild safely, and keep a durable history of reindexing.
 
-**The anti-daemon for index maintenance.** `leandex` is a pure SQL / PL/pgSQL control plane for conservative autonomous reindexing. It installs into a separate control database, talks to target databases through `postgres_fdw` user mappings and `dblink`, and rebuilds only with `reindex index concurrently`. No schema is installed into target databases. No C extension, no `shared_preload_libraries`, no sidecar worker, no restart.
+**The anti-extension, anti-daemon path for index maintenance.** `leandex` is a pure SQL / PL/pgSQL control plane for conservative autonomous reindexing, in the same extension-avoidance spirit as [`pg_ash`](https://github.com/NikolayS/pg_ash) and [`PgQue`](https://github.com/NikolayS/pgque). It installs into a separate control database, talks to target databases through `postgres_fdw` user mappings and `dblink`, and rebuilds only with `reindex index concurrently`. No schema is installed into target databases. No C extension, no `shared_preload_libraries`, no sidecar worker, no restart.
 
 The production target is deliberately narrow: **safe automatic reindexing**. `leandex` does not drop indexes and does not suggest new indexes.
 
@@ -88,43 +88,74 @@ Install and register one target:
 git clone https://github.com/NikolayS/leandex.git
 cd leandex
 
-# 1. Install leandex into a control database.
-PGPASSWORD='your_password' \
-  ./leandex install-control \
-  -H your_host -U your_user -C leandex_control
-
-# 2. Register a target database.
-PGPASSWORD='your_password' \
-  ./leandex register-target \
-  -H your_host -U your_user -C leandex_control \
-  -T your_database --fdw-host your_host
-
-# 3. Verify installation, permissions, FDW security, and environment.
-PGPASSWORD='your_password' \
-  ./leandex verify \
-  -H your_host -U your_user -C leandex_control
+createdb -h your_host -U your_user leandex_control
+psql -h your_host -U your_user -d leandex_control
 ```
 
-Expected verification signals:
+Inside `psql`, install the single-file schema:
+
+```sql
+create extension if not exists postgres_fdw;
+create extension if not exists dblink;
+\i leandex.sql
+```
+
+Create the FDW server, user mapping, and target registration from the same `psql` session:
+
+```sql
+create server target_your_database
+  foreign data wrapper postgres_fdw
+  options (host 'your_host', port '5432', dbname 'your_database');
+
+create user mapping for current_user
+  server target_your_database
+  options (user 'your_user', password 'your_password');
+
+insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
+values ('your_database', 'your_host', 5432, 'target_your_database', true)
+on conflict (database_name) do update
+  set
+    host = excluded.host,
+    port = excluded.port,
+    fdw_server_name = excluded.fdw_server_name,
+    enabled = true;
+```
+
+Verify from SQL:
+
+```sql
+select * from leandex.check_fdw_security_status();
+select * from leandex.check_environment();
+```
+
+Expected verification signals include:
 
 ```text
-FDW: Overall security status|t|All FDW components are properly configured
-Control DB: registered targets|t|your_database
-FDW self-connection test|t|Connected via user mapping
+Overall security status | SECURE
+Control DB: registered targets | t | your_database
+FDW self-connection test | t | Connected via user mapping
 ```
 
-Prefer `PGPASSWORD` or a password file over `-W/--password`; command-line passwords leak through shell history and process listings. Ask me how I know. Actually, don't.
+Prefer `.pgpass`, `PGPASSWORD`, or a protected secret store over command-line passwords. Command-line passwords leak through shell history and process listings. Ask me how I know. Actually, don't.
 
 ### Single-file SQL install
 
-If you prefer plain `psql`, use the bundled installer:
+Use `psql` directly:
 
 ```bash
 createdb -h your_host -U your_user leandex_control
-psql -h your_host -U your_user -d leandex_control -f leandex.sql
+psql -h your_host -U your_user -d leandex_control
 ```
 
-The `./leandex install-control` command uses `leandex.sql` when present and falls back to the split SQL files only for development.
+Then from `psql`:
+
+```sql
+create extension if not exists postgres_fdw;
+create extension if not exists dblink;
+\i leandex.sql
+```
+
+`leandex.sql` is the installation artifact. The split SQL files are for development and reviewable diffs.
 
 ## First dry run
 
@@ -410,7 +441,6 @@ The bloat detection approach in leandex is based on Maxim Boguk's index bloat fo
 
 ```text
 .
-├── leandex                 # installer / admin CLI
 ├── leandex.sql             # single-file SQL installer
 ├── leandex_tables.sql      # split SQL: schema and tables
 ├── leandex_functions.sql   # split SQL: core logic
@@ -437,7 +467,7 @@ GitHub Actions runs:
 - shell formatting and shellcheck;
 - SQL security grep checks;
 - test suite on Postgres 13, 14, 15, 16, 17, and 18;
-- installer verification on Postgres 13 through 18 over a Docker network, so FDW hostnames are real;
+- SQL install verification on Postgres 13 through 18 over a Docker network, so FDW hostnames are real;
 - e2e bloat reduction scenario on Postgres 18 as the primary gate.
 
 ## Documentation
@@ -447,33 +477,16 @@ GitHub Actions runs:
 - [FAQ](docs/faq.md)
 - [Function reference](docs/function_reference.md)
 - [Architecture](docs/architecture.md)
-- [Installer CLI reference](docs/installer_cli_reference.md)
 
 ## Uninstall
 
 Drop only the leandex schema from the control database:
 
-```bash
-PGPASSWORD='your_password' \
-  ./leandex uninstall \
-  -H your_host -U your_user -C leandex_control
-```
-
-Drop the leandex schema and also attempt to drop registered FDW servers:
-
-```bash
-PGPASSWORD='your_password' \
-  ./leandex uninstall \
-  -H your_host -U your_user -C leandex_control --drop-servers
-```
-
-Or manually:
-
 ```sql
 \i uninstall.sql
 ```
 
-`uninstall.sql` intentionally leaves FDW servers and user mappings alone. Shared FDW objects are infrastructure; dropping them by surprise is how tooling loses friends.
+`uninstall.sql` intentionally leaves FDW servers and user mappings alone. Shared FDW objects are infrastructure; dropping them by surprise is how tooling loses friends. Drop FDW servers separately only when you are sure they are not shared.
 
 ## Status
 
@@ -483,4 +496,4 @@ The SQL schema is `leandex`; the original extraction intentionally did a full re
 
 ## License
 
-Apache 2.0.
+BSD 3-Clause.

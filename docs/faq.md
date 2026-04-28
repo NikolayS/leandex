@@ -1,31 +1,46 @@
 ## FAQ
 
-### Installer (leandex)
+### Installation
 
-- **How do I install quickly?** - Use the installer.
+- **How do I install quickly?** - Use the single-file SQL installer.
 ```bash
-PGPASSWORD='your_password' ./leandex install-control -H <host> -U <user> -C <control_db>
-PGPASSWORD='your_password' ./leandex register-target -H <host> -U <user> -C <control_db> -T <db> --fdw-host <target_host>
-PGPASSWORD='your_password' ./leandex verify -H <host> -U <user> -C <control_db>
+createdb -h <host> -U <user> <control_db>
+psql -h <host> -U <user> -d <control_db>
 ```
 
-- **What are the common flags and defaults?**
-  - `-H/--host`: PostgreSQL host
-  - `-P/--port`: Port
-  - `-U/--user`: User
-  - `-W/--password`: Password (prefer `PGPASSWORD` env)
-  - `-C/--control-db`: Control DB
-  - `--fdw-host`: Host used inside FDW (default same as `--host`)
-  - `--no-create-db`: Do not auto-create control DB
-  - `-q/--quiet`: Quieter `psql` output
+Inside `psql`:
+
+```sql
+create extension if not exists postgres_fdw;
+create extension if not exists dblink;
+\i leandex.sql
+```
+
+Then register and verify the target with SQL:
+
+```sql
+create server target_<db> foreign data wrapper postgres_fdw
+  options (host '<target_host>', port '5432', dbname '<db>');
+
+create user mapping for current_user server target_<db>
+  options (user '<target_user>', password '<target_password>');
+
+insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
+values ('<db>', '<target_host>', 5432, 'target_<db>', true)
+on conflict (database_name) do update
+  set host = excluded.host, port = excluded.port, fdw_server_name = excluded.fdw_server_name, enabled = true;
+
+select * from leandex.check_fdw_security_status();
+select * from leandex.check_environment();
+```
 
 - **Managed services specifics (RDS/Aurora, etc.)?**
-  - Installer creates user mappings for the current user on the FDW server.
-  - Use `--fdw-host` reachable from the DB server/container network.
+  - The FDW host must be reachable from the database server/container network.
+  - The control DB role needs privileges to create the FDW server and user mapping.
 
 - **How do I uninstall?**
-```bash
-PGPASSWORD='your_password' ./leandex uninstall -H <host> -U <user> -C <control_db> --drop-servers
+```sql
+\i uninstall.sql
 ```
 
 ### Bloat
@@ -134,10 +149,10 @@ update leandex.target_databases set enabled = false where database_name = '<db>'
 update leandex.target_databases set enabled = true  where database_name = '<db>';
 ```
 
-- **How do I uninstall from the control DB?** - Run the provided script.
-```bash
-# WARNING: removes schema and history in the specified database
-psql -h <host> -U <user> -d <leandex_control_db> -f uninstall.sql
+- **How do I uninstall from the control DB?** - Run the provided script from `psql`.
+```sql
+-- WARNING: removes schema and history in the specified database
+\i uninstall.sql
 ```
 
 ### Performance

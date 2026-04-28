@@ -41,27 +41,17 @@ select jobname, schedule, command, database, active from cron.job where jobname 
 select cron.unschedule('leandex_daily');  -- disable
 ```
 
-### Scheduling with external cron (shell)
+### Scheduling with external schedulers
+
+Prefer running a single `psql` command from your scheduler rather than wrapping leandex in a repository shell helper:
+
 ```bash
-# Create a non-interactive maintenance script on the control host
-cat >/usr/local/bin/leandex_maintenance.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Environment
-export PGHOST="<control_host>"
-export PGUSER="<admin_or_operator_user>"
-export PGDATABASE="<leandex_control_db>"
-
-# Real run — run only on primary/leader
-psql -AtqXc "select not pg_is_in_recovery()" | grep -qx t || exit
-psql -qAtXc "call leandex.periodic(real_run := true);"
-EOF
-chmod +x /usr/local/bin/leandex_maintenance.sh
-
-# Install crontab entry: daily at 02:00
-(crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/leandex_maintenance.sh >>/var/log/leandex_maintenance.log 2>&1") | crontab -
+psql -h <control_host> -U <admin_or_operator_user> -d <leandex_control_db> \
+  -v ON_ERROR_STOP=1 \
+  -c "call leandex.periodic(real_run := true);"
 ```
+
+If your environment has replicas, make the scheduler target the primary/control writer only.
 
 ## Managing State
 
@@ -212,12 +202,21 @@ where i.relname ~ '_ccnew[0-9]*$' and not idx.indisvalid;
 
 ### FDW connection or authentication failures
 
-Re-register the target with the CLI so the FDW server, user mapping, and inventory row are recreated consistently:
+Recreate the FDW server, user mapping, and inventory row from SQL:
 
-```bash
-PGPASSWORD='<password>' ./leandex register-target \
-  -H <control_host> -U <admin_user> -C <leandex_control_db> \
-  -T <target_db> --fdw-host <target_host> --force
+```sql
+drop server if exists target_<target_db> cascade;
+
+create server target_<target_db> foreign data wrapper postgres_fdw
+  options (host '<target_host>', port '5432', dbname '<target_db>');
+
+create user mapping for current_user server target_<target_db>
+  options (user '<target_user>', password '<target_password>');
+
+insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
+values ('<target_db>', '<target_host>', 5432, 'target_<target_db>', true)
+on conflict (database_name) do update
+  set host = excluded.host, port = excluded.port, fdw_server_name = excluded.fdw_server_name, enabled = true;
 ```
 
 Then re-check status:
@@ -263,16 +262,12 @@ update leandex.target_databases set enabled = false where database_name = '<db>'
 ```
 
 ### Uninstall
-```bash
-# WARNING: removes schema and history in the specified database
-psql -h <host> -U <user> -d <leandex_control_db> -f uninstall.sql
+```sql
+-- WARNING: removes schema and history in the current control database
+\i uninstall.sql
 ```
 
-Using the installer:
-```bash
-PGPASSWORD='your_password' \
-  ./leandex uninstall -H <control_host> -U <admin_user> -C <leandex_control_db> --drop-servers
-```
+Drop FDW servers/user mappings separately only after confirming they are not shared infrastructure.
 
 ## Upgrades
 
@@ -296,10 +291,13 @@ pg_dump -h <control_host> -U <admin_user> -d <leandex_control_db> -n leandex -Fc
 ```bash
 cd leandex
 git pull
+psql -h <control_host> -U <admin_user> -d <leandex_control_db>
+```
 
-# Reload functions in control DB
-psql -h <control_host> -U <admin_user> -d <leandex_control_db> -f leandex_functions.sql
-psql -h <control_host> -U <admin_user> -d <leandex_control_db> -f leandex_fdw.sql
+Inside `psql`, reload the single-file installer/update artifact:
+
+```sql
+\i leandex.sql
 ```
 
 ### Post-checks and resume

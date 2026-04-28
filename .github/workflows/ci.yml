@@ -14,9 +14,9 @@ jobs:
       - name: Install shell tools
         run: sudo apt-get update && sudo apt-get install -y shellcheck shfmt
       - name: Check shell formatting
-        run: shfmt -i 2 -ci -bn -sr -d leandex test/run_tests.sh ci/e2e_bloat_reduction.sh
+        run: shfmt -i 2 -ci -bn -sr -d test/run_tests.sh ci/e2e_bloat_reduction.sh
       - name: Run shellcheck
-        run: shellcheck -x leandex test/run_tests.sh ci/e2e_bloat_reduction.sh
+        run: shellcheck -x test/run_tests.sh ci/e2e_bloat_reduction.sh
 
   sql-security:
     name: sql security scan
@@ -74,8 +74,8 @@ jobs:
           name: junit-pg-${{ matrix.pg }}
           path: test/test-results.xml
 
-  installer:
-    name: installer postgres ${{ matrix.pg }}
+  sql-install:
+    name: sql install postgres ${{ matrix.pg }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -83,11 +83,11 @@ jobs:
         pg: ['13', '14', '15', '16', '17', '18']
     steps:
       - uses: actions/checkout@v4
-      - name: Install, register target, verify over Docker network
+      - name: Install via psql, register target, verify over Docker network
         run: |
           set -euo pipefail
-          net="leandex-installer-${{ matrix.pg }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          pg="leandex-installer-pg-${{ matrix.pg }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          net="leandex-sql-install-${{ matrix.pg }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          pg="leandex-sql-install-pg-${{ matrix.pg }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker network create "$net"
           cleanup() {
             docker rm -f "$pg" >/dev/null 2>&1 || true
@@ -108,15 +108,34 @@ jobs:
               exit 1
             fi
           done
-          docker run --rm --network "$net" -v "$PWD:/work" -w /work \
-            -e PGPASSWORD=postgres \
-            postgres:${{ matrix.pg }}-alpine sh -lc '
-              apk add --no-cache bash >/dev/null
-              ./leandex install-control -H postgres -P 5432 -U postgres -C leandex_control_ci
-              ./leandex register-target -H postgres -P 5432 -U postgres -C leandex_control_ci -T postgres --server-name target_postgres --fdw-host postgres --force
-              ./leandex verify -H postgres -P 5432 -U postgres -C leandex_control_ci | tee /tmp/verify.txt
-              grep -q "registered targets|t|postgres" /tmp/verify.txt
-            '
+          docker run --rm --network "$net" -e PGPASSWORD=postgres \
+            postgres:${{ matrix.pg }}-alpine \
+            createdb -h postgres -p 5432 -U postgres leandex_control_ci
+
+          printf "create extension if not exists postgres_fdw;\ncreate extension if not exists dblink;\n\\i leandex.sql\n" | \
+            docker run --rm -i --network "$net" -v "$PWD:/work" -w /work -e PGPASSWORD=postgres \
+              postgres:${{ matrix.pg }}-alpine \
+              psql -h postgres -p 5432 -U postgres -d leandex_control_ci -v ON_ERROR_STOP=1
+
+          docker run --rm --network "$net" -e PGPASSWORD=postgres \
+            postgres:${{ matrix.pg }}-alpine \
+            psql -h postgres -p 5432 -U postgres -d leandex_control_ci -v ON_ERROR_STOP=1 \
+              -c "create server target_postgres foreign data wrapper postgres_fdw options (host 'postgres', port '5432', dbname 'postgres')" \
+              -c "create user mapping for current_user server target_postgres options (user 'postgres', password 'postgres')" \
+              -c "insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled) values ('postgres', 'postgres', 5432, 'target_postgres', true)"
+
+          docker run --rm --network "$net" -e PGPASSWORD=postgres \
+            postgres:${{ matrix.pg }}-alpine \
+            psql -h postgres -p 5432 -U postgres -d leandex_control_ci -v ON_ERROR_STOP=1 -At \
+              -c "select component || chr(124) || status || chr(124) || details from leandex.check_fdw_security_status()" \
+              -c "select component || chr(124) || is_ok || chr(124) || details from leandex.check_environment()" \
+            > /tmp/leandex-verify.txt
+
+          cat /tmp/leandex-verify.txt
+          grep -q "Overall security status|SECURE" /tmp/leandex-verify.txt
+          grep -q "Control DB: registered targets|true|postgres" /tmp/leandex-verify.txt
+          grep -q "FDW self-connection test|true|Connected via user mapping" /tmp/leandex-verify.txt
+
 
   e2e-bloat-reduction:
     name: postgres 18 e2e bloat reduction

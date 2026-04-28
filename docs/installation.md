@@ -1,38 +1,51 @@
 ## Installation
 
-### Quick install via leandex
+### Quick install with the single SQL file
 
 ```bash
 # Clone the repository
 git clone https://github.com/NikolayS/leandex.git
 cd leandex
 
-# 1) Install into control database (auto-creates DB, installs extensions/objects)
-PGPASSWORD='your_password' \
-  ./leandex install-control \
-  -H your_host -U your_user -C your_control_db_name
-
-# 2) Register a target database via FDW (secure user mapping)
-PGPASSWORD='your_password' \
-  ./leandex register-target \
-  -H your_host -U your_user -C your_control_db_name \
-  -T your_database --fdw-host your_host
-
-# 3) Verify installation and environment
-PGPASSWORD='your_password' \
-  ./leandex verify \
-  -H your_host -U your_user -C your_control_db_name
-
-# (Optional) Uninstall
-PGPASSWORD='your_password' \
-  ./leandex uninstall \
-  -H your_host -U your_user -C your_control_db_name --drop-servers
+# 1) Create the control database and install the single-file schema
+createdb -h your_host -U your_user your_control_db_name
+psql -h your_host -U your_user -d your_control_db_name
 ```
 
+Inside `psql`:
+
+```sql
+create extension if not exists postgres_fdw;
+create extension if not exists dblink;
+\i leandex.sql
+```
+
+Then register a target and verify from SQL:
+
+```sql
+create server target_your_database
+  foreign data wrapper postgres_fdw
+  options (host 'your_host', port '5432', dbname 'your_database');
+
+create user mapping for current_user
+  server target_your_database
+  options (user 'your_user', password 'your_password');
+
+insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
+values ('your_database', 'your_host', 5432, 'target_your_database', true)
+on conflict (database_name) do update
+  set
+    host = excluded.host,
+    port = excluded.port,
+    fdw_server_name = excluded.fdw_server_name,
+    enabled = true;
+
+select * from leandex.check_fdw_security_status();
+select * from leandex.check_environment();
+```
 Notes:
-- Use `PGPASSWORD` to avoid echoing secrets; the script won’t print passwords.
-- `--fdw-host` should be reachable from the database server itself (in Docker/CI it might be `postgres`, `127.0.0.1`, or the container IP).
-- For self-hosted replace host with `127.0.0.1`. For managed services ensure the admin user can `create database` and `create extension`.
+- The FDW host must be reachable from the database server itself, not just from your laptop. In Docker/CI it might be `postgres`; in self-hosted local setups it is often `127.0.0.1`.
+- For managed services ensure the admin user can `create database`, `create extension`, `create server`, and `create user mapping`.
 
 Security notes:
 - Prefer `PGPASSWORD` over putting passwords on the command line to avoid shell history leaks.
@@ -47,17 +60,16 @@ Security notes:
 ### Placeholders
 - CONTROL_DB, TARGET_DB, TARGET_HOST, SERVER_NAME (`target_<target_db>`), CONTROL_USER/PASS, TARGET_USER/PASS
 
-### Installer CLI reference
-
-For the full reference of installer subcommands, options, defaults, and examples, see `docs/installer_cli_reference.md`.
-
-
 ### Single-file SQL install
 
 For manual installs, prefer the bundled SQL file:
 
 ```bash
-psql -h your_host -U your_user -d leandex_control -f leandex.sql
+psql -h your_host -U your_user -d leandex_control <<'SQL'
+create extension if not exists postgres_fdw;
+create extension if not exists dblink;
+\i leandex.sql
+SQL
 ```
 
 The split `leandex_*.sql` files are kept for development and reviewable diffs.
@@ -74,14 +86,14 @@ cd leandex
 # 1. Create control database (as admin user)
 psql -h your-instance.region.rds.amazonaws.com -U postgres -c "create database leandex_control;"
 
-# 2. Install required extensions in control database
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -c "CREATE EXTENSION IF NOT EXISTS postgres_fdw;"
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -c "CREATE EXTENSION IF NOT EXISTS dblink;"
+# 2. Install required extensions and leandex in the control database
+psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control <<'SQL'
+create extension if not exists postgres_fdw;
+create extension if not exists dblink;
+\i leandex.sql
+SQL
 
-# 3. Install leandex in the control database
-psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -f leandex.sql
-
-# 4. Create FDW server and user mapping for the TARGET database
+# 3. Create FDW server and user mapping for the TARGET database
 #    fdw_server_name must refer to a foreign server that points to the TARGET DB
 psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control <<'SQL'
 create server if not exists target_your_database foreign data wrapper postgres_fdw
@@ -93,7 +105,7 @@ create user mapping if not exists for current_user server target_your_database
 
 SQL
 
-# 5. Register the TARGET database (links leandex.target_databases to your FDW server)
+# 4. Register the TARGET database (links leandex.target_databases to your FDW server)
 psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control <<'SQL'
 insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
 values ('your_database', 'your-instance.region.rds.amazonaws.com', 5432, 'target_your_database', true)
@@ -105,7 +117,7 @@ on conflict (database_name) do update
     enabled = true;
 SQL
 
-# 6. Verify FDW and environment
+# 5. Verify FDW and environment
 psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -c "select * from leandex.check_fdw_security_status()"
 psql -h your-instance.region.rds.amazonaws.com -U postgres -d leandex_control -c "select * from leandex.check_environment();"
 ```
@@ -120,14 +132,14 @@ cd leandex
 # 1. Create control database (as superuser)
 psql -U postgres -c "create database leandex_control;"
 
-# 2. Install required extensions in control database (as superuser)
-psql -U postgres -d leandex_control -c "CREATE EXTENSION IF NOT EXISTS postgres_fdw;"
-psql -U postgres -d leandex_control -c "CREATE EXTENSION IF NOT EXISTS dblink;"
+# 2. Install required extensions and leandex in the control database
+psql -U postgres -d leandex_control <<'SQL'
+create extension if not exists postgres_fdw;
+create extension if not exists dblink;
+\i leandex.sql
+SQL
 
-# 3. Install leandex in the control database (as superuser)
-psql -U postgres -d leandex_control -f leandex.sql
-
-# 4. Create FDW server and user mapping for the TARGET database
+# 3. Create FDW server and user mapping for the TARGET database
 psql -U postgres -d leandex_control <<'SQL'
 create server if not exists target_your_database foreign data wrapper postgres_fdw
   options (host '127.0.0.1', port '5432', dbname 'your_database');
@@ -136,7 +148,7 @@ create user mapping if not exists for current_user server target_your_database
   options (user 'remote_owner_or_role', password 'remote_password');
 SQL
 
-# 5. Register the TARGET database (links leandex.target_databases to your FDW server)
+# 4. Register the TARGET database (links leandex.target_databases to your FDW server)
 psql -U postgres -d leandex_control <<'SQL'
 insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
 values ('your_database', '127.0.0.1', 5432, 'target_your_database', true)
@@ -144,7 +156,7 @@ on conflict (database_name) do update
   set host=excluded.host, port=excluded.port, fdw_server_name=excluded.fdw_server_name, enabled=true;
 SQL
 
-# 6. Verify
+# 5. Verify
 psql -U postgres -d leandex_control -c "select * from leandex.check_fdw_security_status()"
 psql -U postgres -d leandex_control -c "select * from leandex.check_environment();"
 ```

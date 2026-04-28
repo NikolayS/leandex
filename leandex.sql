@@ -4,7 +4,8 @@
 -- Run this in the leandex control database, normally named leandex_control.
 --
 -- Example:
---   psql -d leandex_control -f leandex.sql
+--   psql -d leandex_control
+--   \i leandex.sql
 
 begin;
 
@@ -1885,7 +1886,7 @@ begin
       when exists (select from leandex.target_databases) then 'YES'
       else 'NO'
     end::text,
-    'Register targets: (SQL) create server + user mapping + insert into leandex.target_databases; or use ./leandex register-target'::text;
+    'Register targets with SQL: create server + user mapping + insert into leandex.target_databases'::text;
 
   -- Check user mapping for current user on at least one target server
   return query select
