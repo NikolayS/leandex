@@ -378,15 +378,12 @@ begin
   raise notice 'PASS: max_parallel_reindexes guard works';
 end $$;
 
--- 9. Pre-existing blocking transaction should not hang forever.
+-- 9. Long ordinary readers should not be treated as REINDEX CONCURRENTLY blockers.
 do $$
 declare
   _target_db text := test_guardrails_target_db();
+  _reason text;
 begin
-  create temporary table if not exists test_guardrails_clock(started_at timestamptz) on commit preserve rows;
-  truncate test_guardrails_clock;
-  insert into test_guardrails_clock values (clock_timestamp());
-
   perform leandex.set_or_replace_setting(_target_db, 'test_guardrails', 'guard_table', 'idx_guardrails_email', 'lock_timeout', '200ms', 'test short timeout');
   if 'blocker' = any(coalesce(dblink_get_connections(), array[]::text[])) then
     perform dblink_disconnect('blocker');
@@ -398,54 +395,67 @@ begin
   from dblink('blocker', 'select count(*) from test_guardrails.guard_table where email >= ''user1@example.com''') as t(count bigint);
   perform pg_sleep(0.3);
 
-  update test_guardrails_clock set started_at = clock_timestamp();
-end $$;
-
-call leandex.do_reindex(:'target_db', 'test_guardrails', 'guard_table', 'idx_guardrails_email', true);
-
-DO $$
-declare
-  _target_db text := test_guardrails_target_db();
-  _elapsed interval;
-  _history record;
-begin
-  select clock_timestamp() - started_at into _elapsed
-  from test_guardrails_clock;
-
-  select status, skip_reason, error_message into _history
-  from leandex.reindex_history
-  where datname = _target_db::name
-    and schemaname = 'test_guardrails'
-    and indexrelname = 'idx_guardrails_email'
-  order by id desc
+  select blocker_reason into _reason
+  from leandex._detect_reindex_blockers(_target_db::name, 'test_guardrails', 'guard_table', 'idx_guardrails_email')
   limit 1;
-
-  if _elapsed > interval '5 seconds' then
-    raise exception 'FAIL: blocking guard took too long: %', _elapsed;
-  end if;
-
-  if _history.status not in ('skipped', 'failed') then
-    raise exception 'FAIL: expected skipped/failed for blocker scenario, got %', _history.status;
-  end if;
-
-  if coalesce(_history.skip_reason, _history.error_message, '') not like 'blocking transaction%' then
-    raise exception 'FAIL: missing blocking transaction reason, got skip=% error=%', _history.skip_reason, _history.error_message;
-  end if;
-
-  if exists (
-    select 1
-    from leandex.current_processed_index
-    where datname = _target_db::name
-      and schemaname = 'test_guardrails'
-      and indexrelname = 'idx_guardrails_email'
-  ) then
-    raise exception 'FAIL: current_processed_index leaked after blocker scenario';
-  end if;
 
   perform dblink_exec('blocker', 'rollback');
   perform dblink_disconnect('blocker');
 
-  raise notice 'PASS: blocking transaction guard returns promptly';
+  if coalesce(_reason, '') like 'blocking transaction%' then
+    raise exception 'FAIL: ordinary long reader falsely detected as blocking transaction: %', _reason;
+  end if;
+
+  raise notice 'PASS: ordinary long reader does not falsely block concurrent reindex';
+end $$;
+
+-- 9b. Cleanup should not delete live current_processed_index rows.
+do $$
+declare
+  _target_db text := test_guardrails_target_db();
+begin
+  insert into leandex.current_processed_index(datname, schemaname, relname, indexrelname)
+  values (_target_db::name, 'test_guardrails', 'guard_table', 'idx_guardrails_email');
+
+  insert into leandex.reindex_history(
+    datname, schemaname, relname, indexrelid, indexrelname,
+    indexsize_before, estimated_tuples, status, error_message
+  ) values (
+    _target_db::name, 'test_guardrails', 'guard_table', 0, 'idx_guardrails_email',
+    1, 1, 'failed', 'test failed cleanup source'
+  ), (
+    _target_db::name, 'test_guardrails', 'guard_table', 0, 'idx_guardrails_email',
+    1, 1, 'in_progress', null
+  );
+
+  call leandex._cleanup_our_not_valid_indexes();
+
+  if not exists (
+    select 1
+    from leandex.current_processed_index
+    where datname = _target_db::name
+      and schemaname = 'test_guardrails'
+      and relname = 'guard_table'
+      and indexrelname = 'idx_guardrails_email'
+  ) then
+    raise exception 'FAIL: cleanup deleted live current_processed_index row';
+  end if;
+
+  delete from leandex.current_processed_index
+  where datname = _target_db::name
+    and schemaname = 'test_guardrails'
+    and relname = 'guard_table'
+    and indexrelname = 'idx_guardrails_email';
+
+  delete from leandex.reindex_history
+  where datname = _target_db::name
+    and schemaname = 'test_guardrails'
+    and relname = 'guard_table'
+    and indexrelname = 'idx_guardrails_email'
+    and indexsize_before = 1
+    and estimated_tuples = 1;
+
+  raise notice 'PASS: cleanup preserves live current_processed_index row';
 end $$;
 
 -- 10. Successful reindex should upgrade baseline confidence and track relfilenode change.

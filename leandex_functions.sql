@@ -1490,6 +1490,13 @@ begin
           and coalesce(a.application_name, '') not like 'leandex:%%'
           and n.nspname = %2$L
           and c.relname in (%3$L, %4$L)
+          and l.mode in (
+            'ShareUpdateExclusiveLock',
+            'ShareLock',
+            'ShareRowExclusiveLock',
+            'ExclusiveLock',
+            'AccessExclusiveLock'
+          )
         order by a.xact_start
         limit 1
       $sql$,
@@ -1921,9 +1928,6 @@ declare
 begin
   for _index in
     select distinct datname, schemaname, relname, indexrelname
-    from leandex.current_processed_index
-    union
-    select distinct datname, schemaname, relname, indexrelname
     from leandex.reindex_history
     where status = 'failed'
       and entry_timestamp >= now() - interval '7 days'
@@ -1992,7 +1996,17 @@ begin
         _index.schemaname, _index.relname, _index.indexrelname, _index.datname, sqlerrm;
     end;
 
-    call leandex._clear_current_processed_index(_index.datname, _index.schemaname, _index.relname, _index.indexrelname);
+    if not exists (
+      select 1
+      from leandex.reindex_history as h
+      where h.datname = _index.datname
+        and h.schemaname = _index.schemaname
+        and h.relname = _index.relname
+        and h.indexrelname = _index.indexrelname
+        and h.status = 'in_progress'
+    ) then
+      call leandex._clear_current_processed_index(_index.datname, _index.schemaname, _index.relname, _index.indexrelname);
+    end if;
   end loop;
 end;
 $body$
