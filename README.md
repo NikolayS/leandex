@@ -25,6 +25,7 @@ The production target is deliberately narrow: **safe automatic reindexing**. `le
 - [Scheduling](#scheduling)
 - [Operations cookbook](#operations-cookbook)
 - [Managed Postgres notes](#managed-postgres-notes)
+- [Acknowledgements](#acknowledgements)
 - [Tests and CI](#tests-and-ci)
 - [Documentation](#documentation)
 - [Uninstall](#uninstall)
@@ -400,6 +401,10 @@ where i.relname ~ '_ccnew[0-9]*$'
 | Self-managed Postgres | yes | easiest path; you control extensions and roles |
 
 Managed provider support is not just “does the extension exist?” The role must also be able to read catalog/statistics data, create FDW user mappings in the control database, and run `reindex index concurrently` on target indexes.
+
+## Acknowledgements
+
+The bloat detection approach in leandex is based on Maxim Boguk's index bloat formula, originally implemented in `pg_index_watch`. That idea is the core reason leandex can use a lightweight baseline-ratio method instead of heavy table scans or narrow btree-only estimates.
 
 ## Repository layout
 
