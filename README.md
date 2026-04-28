@@ -235,7 +235,7 @@ GitHub Actions runs:
 - shell formatting and shellcheck;
 - SQL security grep checks;
 - test suite on Postgres 13, 14, 15, 16, 17, and 18;
-- installer verification on Postgres 16, 17, and 18;
+- installer verification on Postgres 13 through 18;
 - e2e bloat reduction scenario on Postgres 18 as the primary gate.
 
 ## Documentation
