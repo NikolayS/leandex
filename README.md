@@ -26,7 +26,7 @@ The production target is deliberately narrow: **safe automatic reindexing**. `le
 - [Operations cookbook](#operations-cookbook)
 - [Managed Postgres notes](#managed-postgres-notes)
 - [Acknowledgements](#acknowledgements)
-- [Tests and CI](#tests-and-ci)
+- [Contributing](#contributing)
 - [Documentation](#documentation)
 - [Uninstall](#uninstall)
 - [Status](#status)
@@ -453,22 +453,9 @@ The bloat detection approach in leandex is based on Maxim Boguk's index bloat fo
 
 `leandex.sql` is the user-facing installer. The split SQL files stay at repository root for reviewable diffs and development.
 
-## Tests and CI
+## Contributing
 
-Local test run against an existing Postgres:
-
-```bash
-PGPASSWORD=postgres ./test/run_tests.sh \
-  -h 127.0.0.1 -p 5432 -u postgres -w postgres -d test_leandex
-```
-
-GitHub Actions runs:
-
-- shell formatting and shellcheck;
-- SQL security grep checks;
-- test suite on Postgres 13, 14, 15, 16, 17, and 18;
-- SQL install verification on Postgres 13 through 18 over a Docker network, so FDW hostnames are real;
-- e2e bloat reduction scenario on Postgres 18 as the primary gate.
+Contributor workflow, local setup, tests, CI coverage, style, and PR expectations live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
@@ -477,6 +464,7 @@ GitHub Actions runs:
 - [FAQ](docs/faq.md)
 - [Function reference](docs/function_reference.md)
 - [Architecture](docs/architecture.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Uninstall
 

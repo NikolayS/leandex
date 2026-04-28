@@ -1,146 +1,171 @@
-## Contributing to leandex
+# Contributing to leandex
 
-Thank you for your interest in contributing! This document describes how to set up your environment, coding standards, how to run tests, and our commit/PR conventions.
+This file is for contributor workflow. The README is for users deciding whether to use leandex and how to get started.
 
-### Ways to contribute
-- Report bugs and edge cases
-- Improve docs and examples
-- Add tests and CI improvements
-- Implement features and performance improvements
-- Triage issues and review MRs/PRs
+## Ground rules
+
+- Keep changes focused and small.
+- Prefer SQL-first workflows; do not add wrapper CLIs unless there is a strong reason.
+- Add or update tests for behavior changes.
+- Keep docs aligned with the actual install path: `psql` plus `\i leandex.sql`.
+- Do not commit secrets, passwords, dumps, or production identifiers.
 
 ## Development setup
 
-### Prerequisites
-- PostgreSQL 13 or higher (psql client required)
-- Bash shell (Linux/macOS)
-- Docker (optional, for local PG quickly)
+Prerequisites:
 
-### Quick local Postgres (optional)
+- Postgres 13 or newer
+- `psql`
+- Bash
+- Docker, optional but useful for local Postgres
+
+Quick local Postgres:
+
 ```bash
-docker run --rm -d --name pg_dev -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:17-alpine
-# wait ~5–10s until healthy
+docker run --rm -d \
+  --name leandex-dev-pg \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  postgres:18-alpine
 ```
 
-### Manual installation (control DB)
+## Install from a checkout
+
+Create a control database and load the single-file SQL artifact:
+
 ```bash
-# 1) Create control database
-psql -h <host> -U <admin_user> -c "create database leandex_control;"
-
-# 2) Install required extensions in control DB
-psql -h <host> -U <admin_user> -d leandex_control -c "create extension if not exists postgres_fdw;"
-psql -h <host> -U <admin_user> -d leandex_control -c "create extension if not exists dblink;"
-
-# 3) Load schema and functions
-psql -h <host> -U <admin_user> -d leandex_control -f leandex_tables.sql
-psql -h <host> -U <admin_user> -d leandex_control -f leandex_functions.sql
-psql -h <host> -U <admin_user> -d leandex_control -f leandex_fdw.sql
-
-# Note: at this step you may see a WARNING from the internal permissions self-check.
-# It is expected before FDW self-connection is configured.
-
-# 4) Register a target using the CLI so FDW server and user mapping are created consistently
-PGPASSWORD='<password>' ./leandex register-target \
-  -H <host> -U <admin_user> -C leandex_control \
-  -T <target_db> --fdw-host <target_host>
-
-# 5) Verify environment
-psql -h <host> -U <admin_user> -d leandex_control -c "select * from leandex.check_permissions();"
-psql -h <host> -U <admin_user> -d leandex_control -c "select * from leandex.check_fdw_security_status();"
+createdb -h <host> -U <user> leandex_control
+psql -h <host> -U <user> -d leandex_control
 ```
 
-### Register a target database (inventory row + FDW server)
+Inside `psql`:
+
 ```sql
-insert into leandex.target_databases(database_name, host, port, fdw_server_name)
-values ('<target_db>', '<target_host>', 5432, 'target_<target_db>');
+create extension if not exists postgres_fdw;
+create extension if not exists dblink;
+\i leandex.sql
 ```
 
-### Run
-```sql
--- dry run (no reindex)
-call leandex.periodic(false);
+Register a target database:
 
--- real run (may reindex eligible indexes)
-call leandex.periodic(true);
+```sql
+create server target_<db>
+  foreign data wrapper postgres_fdw
+  options (host '<target_host>', port '5432', dbname '<db>');
+
+create user mapping for current_user
+  server target_<db>
+  options (user '<target_user>', password '<target_password>');
+
+insert into leandex.target_databases(database_name, host, port, fdw_server_name, enabled)
+values ('<db>', '<target_host>', 5432, 'target_<db>', true)
+on conflict (database_name) do update
+  set
+    host = excluded.host,
+    port = excluded.port,
+    fdw_server_name = excluded.fdw_server_name,
+    enabled = true;
+```
+
+Verify:
+
+```sql
+select * from leandex.check_fdw_security_status();
+select * from leandex.check_environment();
 ```
 
 ## Testing
 
-- End-to-end SQL tests live in `test/`
-- Run locally:
+Run the SQL suite against an existing Postgres:
+
 ```bash
-cd test
-./run_tests.sh
+PGPASSWORD=postgres ./test/run_tests.sh \
+  -h 127.0.0.1 -p 5432 -u postgres -w postgres -d test_leandex
 ```
-- The suite installs into a temporary database, runs core checks (installation, functionality, security, in-progress handling), and prints a short report.
 
-When adding features/bug fixes:
-- Add or update tests to cover behavior
-- Keep tests deterministic and fast
+Run the PG18 end-to-end bloat reduction scenario over a Docker network:
 
-## Coding standards
+```bash
+net="leandex-e2e-local"
+pg="leandex-e2e-pg"
+docker network create "$net"
+docker run -d --name "$pg" --network "$net" --network-alias postgres \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+  postgres:18-alpine
+
+docker run --rm --network "$net" -v "$PWD:/work" -w /work \
+  -e DB_HOST=postgres -e DB_PORT=5432 \
+  -e DB_USER=postgres -e DB_PASS=postgres \
+  -e DB_NAME=test_leandex_e2e -e FDW_HOST=postgres \
+  postgres:18-alpine \
+  sh -lc 'apk add --no-cache bash >/dev/null && bash ci/e2e_bloat_reduction.sh'
+
+docker rm -f "$pg"
+docker network rm "$net"
+```
+
+Before opening a PR, run the smallest meaningful gate for the change. For SQL behavior changes, that usually means the SQL suite plus the PG18 e2e scenario.
+
+## CI coverage
+
+GitHub Actions runs:
+
+- shell formatting and shellcheck;
+- SQL security grep checks;
+- SQL test suite on Postgres 13, 14, 15, 16, 17, and 18;
+- SQL install verification on Postgres 13 through 18 over a Docker network;
+- PG18 e2e bloat reduction.
+
+## Style
 
 ### SQL
-- Use lowercase keywords
-- snake_case identifiers
-- Be explicit: always use `as` for aliases; explicit join types
-- Prefer CTEs over deeply nested queries
-- Meaningful aliases (no single-letter unless obvious)
-- One argument per line in multi-arg clauses
-- Use ISO 8601 for timestamps
-- Include comments for non-trivial logic
 
-### Shell (Bash)
-- We adhere to the Google Shell Style Guide: https://google.github.io/styleguide/shellguide.html
-- Bash only (`#!/bin/bash`), set `set -euo pipefail`
-- Two-space indentation; keep line length reasonable
-- Quote variables consistently; prefer `"${var}"`
-- Prefer `$(...)` command substitution and `[[ ... ]]` tests
-- Run ShellCheck for new/changed scripts
+- Use lowercase SQL keywords.
+- Use `snake_case` identifiers.
+- Prefer explicit joins and explicit aliases with `as`.
+- Prefer CTEs over deeply nested subqueries.
+- Use one argument per line for long multi-argument calls.
+- Comment non-trivial operational logic.
 
-## Commit message convention and MR/PR titles
+### Shell
 
-We use simplified Conventional Commits. A single line is enough. Types drive versioning and changelog generation.
+- Use Bash for repository scripts.
+- Use two-space indentation.
+- Quote variables consistently.
+- Prefer `$(...)` command substitution.
+- Run ShellCheck and shfmt for changed scripts.
 
-Supported types:
-- `feat:` new functionality (MINOR)
-- `fix:` bug fix (PATCH)
-- `perf:` performance improvement (PATCH)
-- `docs:` documentation only (no release)
-- `chore:` infra, CI, dependencies (no release)
-- `test:` tests only (no release)
-- `refactor:` code refactor without API changes (no release)
+## Commits and PR titles
 
-Breaking changes: add an exclamation mark after the type, e.g. `feat!: drop support for Postgres 13`.
+Use simplified Conventional Commits:
 
-Examples:
-- `feat: add dry-run mode for automatic reindex`
-- `fix: avoid deadlock on REINDEX CONCURRENTLY`
-- `perf: reduce lock time by 20%`
-- `docs: update PG 13–17 support matrix`
-- `refactor!: remove legacy flag`
+- `feat:` new functionality
+- `fix:` bug fix
+- `perf:` performance improvement
+- `docs:` documentation only
+- `chore:` infrastructure, CI, dependencies
+- `test:` tests only
+- `refactor:` refactor without behavior change
 
-MR/PR titles should follow the same convention as the main commit.
+Breaking changes use `!`, for example `feat!: drop support for Postgres 13`.
 
-Additional guidance:
-- Keep PRs focused and reasonably small
-- Include rationale, migration notes (if any), and benchmarks when relevant
-- Reference related issues (e.g., `Closes #123`)
+Keep PRs focused. Include rationale, test evidence, migration notes when relevant, and issue references when available.
 
-## Review checklist (for authors and reviewers)
-- Tests added/updated and pass locally
-- Backward compatibility considered; breaking changes clearly marked (`type!:`)
-- Security and credentials: no secrets in code; FDW user mappings only
-- Docs updated (README/runbook/installation) if behavior or UX changed
-- Performance impact measured for non-trivial changes
+## Review checklist
+
+- Tests added or updated for behavior changes.
+- Local gate passed and evidence is in the PR.
+- Docs updated when behavior, setup, or UX changes.
+- Security checked: no secrets, no unsafe FDW/user-mapping shortcuts.
+- Backward compatibility considered; breaking changes are explicit.
 
 ## Reporting issues
+
 Please include:
-- PostgreSQL version (`select current_setting('server_version');`)
-- `select leandex.version();`
-- Output of `select * from leandex.check_fdw_security_status();` and `select * from leandex.check_permissions();`
-- Recent failures if relevant
-- Minimal reproduction steps and expected vs actual behavior
 
-
-
+- Postgres version: `select current_setting('server_version');`
+- leandex version: `select leandex.version();`
+- `select * from leandex.check_fdw_security_status();`
+- `select * from leandex.check_environment();`
+- minimal reproduction steps;
+- expected and actual behavior.
