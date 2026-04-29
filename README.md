@@ -7,13 +7,14 @@
 
 Keep Postgres indexes lean: detect bloat, rebuild safely, and keep a durable history of reindexing.
 
-**The anti-extension, anti-daemon path for index maintenance.** `leandex` is a pure SQL / PL/pgSQL control plane for conservative autonomous reindexing, in the same extension-avoidance spirit as [`pg_ash`](https://github.com/NikolayS/pg_ash) and [`PgQue`](https://github.com/NikolayS/pgque). It installs into a separate control database, talks to target databases through `postgres_fdw` user mappings and `dblink`, and rebuilds only with `reindex index concurrently`. No schema is installed into target databases. No C extension, no `shared_preload_libraries`, no sidecar worker, no restart.
+**The anti-extension, anti-daemon path for index maintenance.** `leandex` is a pure SQL / PL/pgSQL control plane for conservative autonomous reindexing, in the same extension-avoidance spirit as [`pg_ash`](https://github.com/NikolayS/pg_ash) and [`PgQue`](https://github.com/NikolayS/pgque). It installs into a separate control database, talks to target databases through `postgres_fdw` user mappings and `dblink`, and rebuilds only with `reindex index concurrently`. For leandex itself: no schema in target databases, no C extension, no sidecar worker, no new background worker, no restart.
 
 The production target is deliberately narrow: **safe automatic reindexing**. `leandex` does not drop indexes and does not suggest new indexes.
 
 ## Contents
 
 - [Why leandex](#why-leandex)
+- [Why anti-extension](#why-anti-extension)
 - [What leandex does](#what-leandex-does)
 - [What leandex refuses to do](#what-leandex-refuses-to-do)
 - [Quick start](#quick-start)
@@ -26,6 +27,7 @@ The production target is deliberately narrow: **safe automatic reindexing**. `le
 - [Operations cookbook](#operations-cookbook)
 - [Managed Postgres notes](#managed-postgres-notes)
 - [Acknowledgements](#acknowledgements)
+- [Repository layout](#repository-layout)
 - [Contributing](#contributing)
 - [Documentation](#documentation)
 - [Uninstall](#uninstall)
@@ -45,9 +47,17 @@ Index bloat is boring until it quietly taxes every expensive part of Postgres: b
 
 This is DBA automation, not a magic index advisor. It automates the maintenance task that should be boring, and it leaves the sharp product decisions to humans and separately gated tools.
 
+## Why anti-extension
+
+The point is portability, not ideology. A new C extension only helps after each Postgres provider agrees to ship it, and that timeline is not controlled by the user. `leandex` stays in the control plane instead: one SQL file in a separate database, with target access through `postgres_fdw` user mappings and `dblink`.
+
+That avoids installing schemas or functions into application databases, avoids a custom C extension, avoids a sidecar daemon, and avoids a new background worker. It also means the deployment story is closer to [`pg_ash`](https://github.com/NikolayS/pg_ash) and [`PgQue`](https://github.com/NikolayS/pgque): build on components many Postgres environments already have.
+
+This does **not** mean every managed provider is automatically certified. `postgres_fdw`, `dblink`, privileges, network reachability, and scheduling policy still need to be validated per environment. See [Managed Postgres notes](#managed-postgres-notes).
+
 ## What leandex does
 
-- Detects index bloat with a lightweight baseline-ratio method.
+- Detects index bloat with a lightweight baseline-ratio method: current bytes-per-tuple compared to the smallest ratio observed for that index.
 - Rebuilds eligible indexes using `reindex index concurrently`.
 - Stores latest observed index state in `leandex.index_latest_state`.
 - Stores every rebuild attempt in `leandex.reindex_history`.
@@ -328,7 +338,10 @@ select leandex.set_or_replace_setting(
 
 With `pg_cron`:
 
+> `pg_cron` may require `shared_preload_libraries` and a Postgres restart / managed-service parameter group change if it is not already enabled. It can also live outside the control database; connect to the pg_cron database (`show cron.database_name`) and use `cron.schedule_in_database(...)` to target `leandex_control`.
+
 ```sql
+-- Run this from the database where pg_cron is installed.
 select cron.schedule_in_database(
   'leandex-maintenance',
   '0 3 * * *',
@@ -340,10 +353,12 @@ select cron.schedule_in_database(
 With external cron:
 
 ```bash
-PGPASSWORD='your_password' psql \
-  -h your_host -U your_user -d leandex_control \
+psql -h your_host -U your_user -d leandex_control \
+  -v ON_ERROR_STOP=1 \
   -c "call leandex.periodic(true);"
 ```
+
+Use `~/.pgpass` on the scheduler host (`0600`) or a protected secret store; do not put passwords in the command line.
 
 Scheduling advice:
 
@@ -360,7 +375,7 @@ Pause all automatic rebuilds:
 ```sql
 select leandex.set_or_replace_setting(
   null, null, null, null,
-  'skip_index_rebuild', 'true',
+  'skip', 'true',
   'pause all leandex rebuilds'
 );
 ```
@@ -370,7 +385,7 @@ Resume rebuilds:
 ```sql
 select leandex.set_or_replace_setting(
   null, null, null, null,
-  'skip_index_rebuild', 'false',
+  'skip', 'false',
   'resume leandex rebuilds'
 );
 ```
@@ -409,9 +424,10 @@ order by entry_timestamp desc
 limit 20;
 ```
 
-Review leftover invalid `_ccnew` indexes manually:
+Review leftover invalid `_ccnew` indexes manually on each target database:
 
 ```sql
+-- Run on the target DB, not the leandex control DB.
 select n.nspname, i.relname
 from pg_index as idx
 join pg_class as i on i.oid = idx.indexrelid
