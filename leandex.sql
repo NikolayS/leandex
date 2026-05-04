@@ -178,7 +178,17 @@ create table leandex.index_latest_state (
   indexsize bigint not null,
   indisvalid boolean not null default true,
   estimated_tuples bigint not null,
-  best_ratio real
+  best_ratio real,
+  -- Provenance of best_ratio. NULL while best_ratio is NULL (index too small).
+  --   'first_seen' — initial observation; baseline may itself be bloated, so
+  --                  estimated_bloat is reported as NULL until promoted
+  --   'reindexed'  — stamped after a successful leandex-driven REINDEX
+  --   'forced'     — operator-attested clean state via do_force_populate_index_stats
+  --   'improved'   — least() reduced best_ratio after first observation, which
+  --                  proves the original baseline was not the minimum
+  baseline_source text check (baseline_source in ('first_seen', 'reindexed', 'forced', 'improved')),
+  baseline_set_at timestamptz,
+  last_reindex_at timestamptz
 );
 
 create unique index index_latest_state_oid_index on leandex.index_latest_state(datid, indexrelid);
@@ -216,7 +226,7 @@ create table leandex.tables_version (
 
 create unique index tables_version_single_row on leandex.tables_version((version is not null));
 
-insert into leandex.tables_version values(1);
+insert into leandex.tables_version values(2);
 
 
 /*
@@ -529,7 +539,7 @@ create function leandex._check_structure_version() returns void as
 $body$
 declare
   _tables_version integer;
-  _required_version integer := 1;
+  _required_version integer := 2;
 begin
   select version into strict _tables_version from leandex.tables_version;
 
@@ -556,7 +566,7 @@ create function leandex.check_update_structure_version() returns void as
 $body$
 declare
    _tables_version integer;
-   _required_version integer := 1;
+   _required_version integer := 2;
 begin
   select version into strict _tables_version from leandex.tables_version;
 
@@ -571,6 +581,44 @@ begin
   end loop;
 
   return;
+end;
+$body$
+language plpgsql;
+
+
+/*
+ * Schema migration v1 → v2
+ * Adds baseline provenance tracking columns to leandex.index_latest_state.
+ * Existing rows are backfilled as 'first_seen' so that get_index_bloat_estimates
+ * starts returning NULL for them — operators must explicitly attest a clean
+ * baseline (do_force_populate_index_stats) or wait for a leandex-driven REINDEX
+ * before bloat estimates resume.
+ */
+create function leandex._structure_version_1_2() returns void as
+$body$
+begin
+  alter table leandex.index_latest_state
+    add column if not exists baseline_source text
+      check (baseline_source in ('first_seen', 'reindexed', 'forced', 'improved')),
+    add column if not exists baseline_set_at timestamptz,
+    add column if not exists last_reindex_at timestamptz;
+
+  -- Backfill provenance for rows that already have a baseline. We cannot tell
+  -- after the fact whether the original observation was clean, so we mark them
+  -- 'first_seen' — the conservative default. Rows whose best_ratio is NULL stay
+  -- NULL (no baseline to characterize).
+  update leandex.index_latest_state
+    set baseline_source = 'first_seen',
+        baseline_set_at = mtime
+    where best_ratio is not null
+      and baseline_source is null;
+
+  update leandex.tables_version set version = 2;
+
+  raise notice
+    'leandex: migrated index_latest_state to schema v2 (baseline provenance). '
+    'Existing baselines were marked ''first_seen'' and will report NULL bloat '
+    'until promoted by a leandex-driven REINDEX or do_force_populate_index_stats.';
 end;
 $body$
 language plpgsql;
@@ -942,7 +990,8 @@ create function leandex._record_indexes_info(
   _schemaname name,
   _relname name,
   _indexrelname name,
-  _force_populate boolean default false
+  _force_populate boolean default false,
+  _post_reindex boolean default false
 ) returns void as
 $body$
 declare
@@ -977,7 +1026,8 @@ begin
   )
   -- todo: do something with ugly code duplication in leandex._reindex_index and leandex._record_indexes_info
   insert into leandex.index_latest_state as i
-  (datid, datname, schemaname, relname, indexrelid, indexrelname, indexsize, indisvalid, estimated_tuples, best_ratio)
+  (datid, datname, schemaname, relname, indexrelid, indexrelname, indexsize, indisvalid, estimated_tuples,
+   best_ratio, baseline_source, baseline_set_at, last_reindex_at)
   select
     datid,
     datname,
@@ -991,13 +1041,28 @@ begin
     case
       when (indexsize > pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'minimum_reliable_index_size'))) then
         -- initialize baseline from the current ratio on first sighting (insert),
-        -- including after REINDEX/OID change; _force_populate is not needed on insert
+        -- including after REINDEX/OID change
         indexsize::real / estimated_tuples::real
       else
         -- too small for reliable baseline
-          null
+        null
       end
-    as best_ratio
+    as best_ratio,
+    -- Provenance for the freshly stamped baseline. NULL when there is no
+    -- baseline yet (index too small).
+    case
+      when (indexsize <= pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'minimum_reliable_index_size')))
+        then null
+      when _force_populate then 'forced'
+      when _post_reindex then 'reindexed'
+      else 'first_seen'
+    end as baseline_source,
+    case
+      when (indexsize <= pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'minimum_reliable_index_size')))
+        then null
+      else now()
+    end as baseline_set_at,
+    case when _post_reindex then now() else null end as last_reindex_at
   from _actual_indexes
   on conflict (datid, indexrelid)
   do update set
@@ -1014,6 +1079,10 @@ begin
         -- _force_populate=true set (or write) best ratio to current ratio (except the case when index too small to be reliably estimated)
         when (_force_populate and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
           then excluded.indexsize::real / excluded.estimated_tuples::real
+        -- _post_reindex=true: trust the just-rebuilt size as the new baseline,
+        -- since REINDEX CONCURRENTLY produces a fresh, compacted index
+        when (_post_reindex and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+          then excluded.indexsize::real / excluded.estimated_tuples::real
         -- if index is too small, keep previous
         when (excluded.indexsize < pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
           then i.best_ratio
@@ -1022,7 +1091,40 @@ begin
           then excluded.indexsize::real / excluded.estimated_tuples::real
         -- otherwise keep baseline unchanged (non-increasing, unaffected by reltuples drift)
         else least(i.best_ratio, excluded.indexsize::real / excluded.estimated_tuples::real)
-      end;
+      end,
+    baseline_source =
+      case
+        -- mirrors the best_ratio branches above
+        when (_force_populate and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+          then 'forced'
+        when (_post_reindex and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+          then 'reindexed'
+        when (excluded.indexsize < pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+          then i.baseline_source
+        when (i.best_ratio is null)
+          then 'first_seen'
+        -- least() actually reduced best_ratio: the original baseline was not
+        -- the minimum, so promote 'first_seen' to 'improved'. Already-trusted
+        -- sources stay as-is.
+        when (i.baseline_source = 'first_seen' and excluded.indexsize::real / excluded.estimated_tuples::real < i.best_ratio)
+          then 'improved'
+        else i.baseline_source
+      end,
+    baseline_set_at =
+      case
+        when (_force_populate and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+          then now()
+        when (_post_reindex and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+          then now()
+        when (i.best_ratio is null
+              and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+          then now()
+        when (i.baseline_source = 'first_seen' and excluded.indexsize::real / excluded.estimated_tuples::real < i.best_ratio)
+          then now()
+        else i.baseline_set_at
+      end,
+    last_reindex_at =
+      case when _post_reindex then now() else i.last_reindex_at end;
 
   -- tell about not valid indexes
   for index_info in
@@ -1101,7 +1203,8 @@ create function leandex.get_index_bloat_estimates(
   relname name,
   indexrelname name,
   indexsize bigint,
-  estimated_bloat real
+  estimated_bloat real,
+  baseline_source text
 ) as
 $body$
 declare
@@ -1111,14 +1214,22 @@ begin
 
   select oid from pg_database as d where d.datname = _datname into _datid;
 
-  -- calculate estimated bloat by comparing the current size-to-tuple ratio with the best observed ratio
+  -- Bloat is reported as NULL when baseline_source = 'first_seen' because the
+  -- baseline may itself reflect bloat present at install time. Operators must
+  -- promote the baseline (REINDEX via leandex, or do_force_populate_index_stats)
+  -- before estimates resume; otherwise least() will eventually promote the row
+  -- to 'improved' on its own once a smaller size is observed.
   return query select
     _datname,
     i.schemaname,
     i.relname,
     i.indexrelname,
     i.indexsize,
-    (i.indexsize::real / (i.best_ratio * estimated_tuples::real)) as estimated_bloat
+    case
+      when i.baseline_source = 'first_seen' then null::real
+      else (i.indexsize::real / (i.best_ratio * estimated_tuples::real))
+    end as estimated_bloat,
+    i.baseline_source
   from leandex.index_latest_state as i
   where
     i.datid = _datid
@@ -1293,7 +1404,12 @@ begin
           indexsize >= pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_size_threshold'))
           -- ignore indexes explicitly marked to be skipped
           and leandex.get_setting(datname, schemaname, relname, indexrelname, 'skip')::boolean is distinct from true
-          -- placeholder for future configurability using get_setting
+          -- estimated_bloat is null when get_index_bloat_estimates cannot trust
+          -- the baseline (typically baseline_source = 'first_seen'). Rebuilding
+          -- in that case is the safety net: one REINDEX produces a clean
+          -- baseline ('reindexed') and future runs report real bloat. This is
+          -- why an install on already-bloated indexes still gets fixed instead
+          -- of silently reporting 1.00 forever.
           and (
             estimated_bloat is null
             or estimated_bloat >= leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_rebuild_scale_factor')::float
@@ -1392,6 +1508,19 @@ begin
             and indexrelname = _index.indexrelname
             and status = 'in_progress';
         end;
+
+        -- Re-snapshot the just-rebuilt index so its baseline is stamped as
+        -- 'reindexed' (trusted). REINDEX CONCURRENTLY assigns a new indexrelid;
+        -- _record_indexes_info deletes the obsolete row keyed by the old OID
+        -- and inserts a fresh one with the post-reindex size.
+        perform leandex._record_indexes_info(
+          _index.datname,
+          _index.schemaname,
+          _index.relname,
+          _index.indexrelname,
+          _force_populate => false,
+          _post_reindex => true
+        );
 
       exception when others then
         raise warning 'REINDEX failed for %.%: %', _index.schemaname, _index.indexrelname, sqlerrm;
