@@ -175,11 +175,19 @@ create table leandex.index_latest_state (
   --                  estimated_bloat is reported as NULL until promoted
   --   'reindexed'  — stamped after a successful leandex-driven REINDEX
   --   'forced'     — operator-attested clean state via do_force_populate_index_stats
-  --   'improved'   — least() reduced best_ratio after first observation, which
-  --                  proves the original baseline was not the minimum
-  baseline_source text check (baseline_source in ('first_seen', 'reindexed', 'forced', 'improved')),
+  --   'improved'   — least() reduced best_ratio after first_seen observation,
+  --                  proving the original baseline was not the minimum
+  --   'migrated'   — pre-existing v1 baseline carried forward by the v1->v2
+  --                  migration; trusted, but the original v1 baseline may have
+  --                  been bloated and we cannot tell retroactively
+  baseline_source text check (baseline_source in ('first_seen', 'reindexed', 'forced', 'improved', 'migrated')),
   baseline_set_at timestamptz,
-  last_reindex_at timestamptz
+  last_reindex_at timestamptz,
+  -- Invariant: if a baseline ratio is set, its provenance must be set too.
+  -- Pre-PR rows (best_ratio set, baseline_source null) are excluded by the
+  -- migration's backfill, which assigns 'migrated' to all such rows.
+  constraint baseline_source_present_when_ratio_set
+    check (best_ratio is null or baseline_source is not null)
 );
 
 create unique index index_latest_state_oid_index on leandex.index_latest_state(datid, indexrelid);
