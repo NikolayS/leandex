@@ -189,6 +189,42 @@ begin
     coalesce(_max_bloat, 0), _threshold;
 end $$;
 
+-- 7b. Regression: do_force_populate_index_stats called AFTER bloat must NOT
+-- destroy a healthy baseline. Reported by an early user who ran the function
+-- a second time post-bloat and saw estimated_bloat lock at 1.00 forever.
+do $$
+declare
+  _bloat_before_force float;
+  _bloat_after_force  float;
+  _target_db text;
+begin
+  select database_name into _target_db
+  from leandex.target_databases where enabled = true limit 1;
+
+  -- snapshot bloat before the destructive call
+  select max(estimated_bloat) into _bloat_before_force
+  from leandex.get_index_bloat_estimates(_target_db)
+  where schemaname = 'test_leandex_app';
+
+  -- the user's mistake: re-run on already-bloated indexes
+  perform leandex.do_force_populate_index_stats(_target_db, 'test_leandex_app', null, null);
+  call leandex.periodic(false);
+
+  select max(estimated_bloat) into _bloat_after_force
+  from leandex.get_index_bloat_estimates(_target_db)
+  where schemaname = 'test_leandex_app';
+
+  if _bloat_before_force is null then
+    raise notice 'SKIP: pre-bloat snapshot was null, cannot regression-check';
+  elsif _bloat_after_force is null or _bloat_after_force < _bloat_before_force * 0.99 then
+    raise exception 'FAIL: do_force_populate_index_stats destroyed the healthy baseline (before=%, after=%)',
+      _bloat_before_force, _bloat_after_force;
+  else
+    raise notice 'PASS: do_force_populate_index_stats is non-destructive (before=%, after=%)',
+      _bloat_before_force, _bloat_after_force;
+  end if;
+end $$;
+
 -- 8. Cleanup test data
 do $$
 begin

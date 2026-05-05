@@ -1076,11 +1076,9 @@ begin
     estimated_tuples = excluded.estimated_tuples,
     best_ratio =
       case
-        -- _force_populate=true set (or write) best ratio to current ratio (except the case when index too small to be reliably estimated)
-        when (_force_populate and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
-          then excluded.indexsize::real / excluded.estimated_tuples::real
         -- _post_reindex=true: trust the just-rebuilt size as the new baseline,
-        -- since REINDEX CONCURRENTLY produces a fresh, compacted index
+        -- since REINDEX CONCURRENTLY produces a fresh, compacted index. This
+        -- is the only path that may RAISE best_ratio.
         when (_post_reindex and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
           then excluded.indexsize::real / excluded.estimated_tuples::real
         -- if index is too small, keep previous
@@ -1089,35 +1087,42 @@ begin
         -- fill only if missing
         when (i.best_ratio is null)
           then excluded.indexsize::real / excluded.estimated_tuples::real
-        -- otherwise keep baseline unchanged (non-increasing, unaffected by reltuples drift)
+        -- otherwise non-increasing. Note: _force_populate intentionally does
+        -- NOT override here. Older versions reset best_ratio to current
+        -- regardless of direction, which let an operator destroy a healthy
+        -- baseline by running do_force_populate_index_stats again after the
+        -- index had bloated (the heuristic then read estimated_bloat=1.00
+        -- forever). Now do_force_populate_index_stats is a labeling/attestation
+        -- operation: it can stamp/promote baseline_source to 'forced' and bump
+        -- baseline_set_at, but it never makes best_ratio worse.
         else least(i.best_ratio, excluded.indexsize::real / excluded.estimated_tuples::real)
       end,
     baseline_source =
       case
-        -- mirrors the best_ratio branches above
-        when (_force_populate and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
-          then 'forced'
         when (_post_reindex and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
           then 'reindexed'
         when (excluded.indexsize < pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
           then i.baseline_source
+        -- baseline freshly initialized this round
         when (i.best_ratio is null)
-          then 'first_seen'
-        -- least() actually reduced best_ratio: the original baseline was not
-        -- the minimum, so promote 'first_seen' to 'improved'. Already-trusted
-        -- sources stay as-is.
+          then case when _force_populate then 'forced' else 'first_seen' end
+        -- operator attestation upgrades 'first_seen' (untrusted) to 'forced'
+        when (_force_populate and i.baseline_source = 'first_seen')
+          then 'forced'
+        -- least() reduced best_ratio after first_seen → 'improved' (or 'forced'
+        -- when the operator explicitly attested via _force_populate)
         when (i.baseline_source = 'first_seen' and excluded.indexsize::real / excluded.estimated_tuples::real < i.best_ratio)
           then 'improved'
         else i.baseline_source
       end,
     baseline_set_at =
       case
-        when (_force_populate and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
-          then now()
         when (_post_reindex and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
           then now()
         when (i.best_ratio is null
               and excluded.indexsize > pg_size_bytes(leandex.get_setting(excluded.datname, excluded.schemaname, excluded.relname, excluded.indexrelname, 'minimum_reliable_index_size')))
+          then now()
+        when (_force_populate and i.baseline_source = 'first_seen')
           then now()
         when (i.baseline_source = 'first_seen' and excluded.indexsize::real / excluded.estimated_tuples::real < i.best_ratio)
           then now()
@@ -1568,8 +1573,22 @@ language plpgsql;
 
 
 /*
- * Force-populate index statistics and bloat baselines without reindexing
- * Records current size-to-tuple ratios as optimal baselines, supports filtering
+ * Attest that the current state of the matched indexes is a clean baseline.
+ * Used after a fresh install or after rebuilding indexes by other means, to
+ * tell leandex "treat what you observe now as healthy."
+ *
+ * Behavior is intentionally non-destructive: best_ratio is non-increasing.
+ *   - if no baseline exists yet, the current size-per-tuple is recorded as
+ *     the baseline and tagged 'forced';
+ *   - if a baseline exists and the current ratio is BETTER (smaller), the
+ *     baseline is improved via least() and re-tagged 'forced';
+ *   - if the current ratio is WORSE (larger), the baseline is preserved.
+ *     Calling this on an already-bloated state cannot pollute the baseline.
+ *
+ * This is a deliberate change from earlier behavior where this function
+ * unconditionally overwrote best_ratio with the current ratio — which made
+ * accidentally re-running it after a bloat-generating workload silently
+ * destroy the healthy baseline and lock estimated_bloat at 1.00 forever.
  */
 create function leandex.do_force_populate_index_stats(
   _datname name,
@@ -1590,7 +1609,7 @@ begin
     _connection_created := true;
   end if;
 
-  -- Force-populate best_ratio from current state without reindexing
+  -- Operator attestation; see _record_indexes_info for the actual upsert logic.
   perform leandex._record_indexes_info(_datname, _schemaname, _relname, _indexrelname, _force_populate=>true);
   return;
 
