@@ -169,7 +169,22 @@ create table leandex.index_latest_state (
   indexsize bigint not null,
   indisvalid boolean not null default true,
   estimated_tuples bigint not null,
-  best_ratio real
+  best_ratio real,
+  /*
+   * Provenance of best_ratio. NULL while best_ratio is NULL (index too small).
+   *   'first_seen' — initial observation; baseline may itself reflect bloat,
+   *                  so estimated_bloat is reported as NULL until promoted
+   *   'reindexed'  — stamped after a successful leandex-driven REINDEX
+   *   'forced'     — operator-attested clean state via do_force_populate_index_stats
+   *   'improved'   — least() reduced best_ratio after a 'first_seen' observation,
+   *                  proving the original baseline was not the minimum
+   */
+  baseline_source text check (baseline_source in ('first_seen', 'reindexed', 'forced', 'improved')),
+  baseline_set_at timestamptz,
+  last_reindex_at timestamptz,
+  /* Invariant: provenance must be set whenever a baseline ratio is. */
+  constraint baseline_source_present_when_ratio_set
+    check (best_ratio is null or baseline_source is not null)
 );
 
 create unique index index_latest_state_oid_index on leandex.index_latest_state(datid, indexrelid);
@@ -207,7 +222,7 @@ create table leandex.tables_version (
 
 create unique index tables_version_single_row on leandex.tables_version((version is not null));
 
-insert into leandex.tables_version values(1);
+insert into leandex.tables_version values(2);
 
 
 /*
