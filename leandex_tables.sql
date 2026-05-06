@@ -170,22 +170,19 @@ create table leandex.index_latest_state (
   indisvalid boolean not null default true,
   estimated_tuples bigint not null,
   best_ratio real,
-  -- Provenance of best_ratio. NULL while best_ratio is NULL (index too small).
-  --   'first_seen' — initial observation; baseline may itself be bloated, so
-  --                  estimated_bloat is reported as NULL until promoted
-  --   'reindexed'  — stamped after a successful leandex-driven REINDEX
-  --   'forced'     — operator-attested clean state via do_force_populate_index_stats
-  --   'improved'   — least() reduced best_ratio after first_seen observation,
-  --                  proving the original baseline was not the minimum
-  --   'migrated'   — pre-existing v1 baseline carried forward by the v1->v2
-  --                  migration; trusted, but the original v1 baseline may have
-  --                  been bloated and we cannot tell retroactively
-  baseline_source text check (baseline_source in ('first_seen', 'reindexed', 'forced', 'improved', 'migrated')),
+  /*
+   * Provenance of best_ratio. NULL while best_ratio is NULL (index too small).
+   *   'first_seen' — initial observation; baseline may itself reflect bloat,
+   *                  so estimated_bloat is reported as NULL until promoted
+   *   'reindexed'  — stamped after a successful leandex-driven REINDEX
+   *   'forced'     — operator-attested clean state via do_force_populate_index_stats
+   *   'improved'   — least() reduced best_ratio after a 'first_seen' observation,
+   *                  proving the original baseline was not the minimum
+   */
+  baseline_source text check (baseline_source in ('first_seen', 'reindexed', 'forced', 'improved')),
   baseline_set_at timestamptz,
   last_reindex_at timestamptz,
-  -- Invariant: if a baseline ratio is set, its provenance must be set too.
-  -- Pre-PR rows (best_ratio set, baseline_source null) are excluded by the
-  -- migration's backfill, which assigns 'migrated' to all such rows.
+  /* Invariant: provenance must be set whenever a baseline ratio is. */
   constraint baseline_source_present_when_ratio_set
     check (best_ratio is null or baseline_source is not null)
 );

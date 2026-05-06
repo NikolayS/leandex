@@ -164,10 +164,24 @@ Start with inventory and dry-run behavior. Do not point a new automation loop at
 Populate index state without rebuilding:
 
 ```sql
+call leandex.periodic(false);
+```
+
+This records every eligible index in `leandex.index_latest_state`. The first observation establishes a baseline tagged `baseline_source = 'first_seen'`, which is reported as **untrusted** until promoted: `estimated_bloat` reads NULL for these rows. That is intentional — leandex cannot tell whether a freshly observed index was already bloated when it was first seen, and silently treating a bloated baseline as "healthy" is the bug this column was added to prevent.
+
+Promotion to a trusted baseline happens any of three ways:
+
+1. **`leandex.do_force_populate_index_stats(...)`** — operator attestation that the current state is healthy. Source becomes `'forced'`. Non-destructive: never raises `best_ratio`, so calling it twice is safe.
+2. **A leandex-driven `REINDEX`** (via `periodic(true)` or `do_reindex`). Source becomes `'reindexed'`.
+3. **Auto-promote**: if a later `periodic` run observes a smaller size-per-tuple ratio than the recorded baseline, source becomes `'improved'` (the original `'first_seen'` ratio was not the true minimum).
+
+If you have just installed leandex on a healthy database and want bloat estimates immediately, run the attestation:
+
+```sql
 select leandex.do_force_populate_index_stats('appdb', 'public', null, null);
 ```
 
-Check estimated bloat:
+Check estimated bloat (always include `baseline_source` so a `NULL` value is self-explanatory):
 
 ```sql
 select
@@ -176,13 +190,14 @@ select
   relname,
   indexrelname,
   pg_size_pretty(indexsize) as index_size,
-  estimated_bloat
+  estimated_bloat,
+  baseline_source
 from leandex.get_index_bloat_estimates('appdb')
-order by estimated_bloat desc
+order by estimated_bloat desc nulls first
 limit 20;
 ```
 
-Run one maintenance cycle in dry-run mode (`false` means do not rebuild):
+`estimated_bloat = NULL` means "untrusted baseline — see `baseline_source`." The default `periodic(true)` rebuild gate treats NULL bloat as a signal to rebuild and re-establish a clean baseline; on a fresh install this is the desired self-heal. To preview what `periodic(true)` would do, run:
 
 ```sql
 call leandex.periodic(false);

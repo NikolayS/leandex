@@ -257,7 +257,7 @@ begin
   end if;
 
   if _baseline_source_after is null
-     or _baseline_source_after not in ('forced', 'reindexed', 'improved', 'migrated') then
+     or _baseline_source_after not in ('forced', 'reindexed', 'improved') then
     raise exception 'FAIL: baseline_source was downgraded to % (was %)',
       _baseline_source_after, _baseline_source_before;
   end if;
