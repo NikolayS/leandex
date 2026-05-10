@@ -182,14 +182,15 @@ select * from leandex.target_databases;
 After registering targets, you may want to initialize a bloat baseline and inspect candidates before running real reindexing.
 
 ```sql
--- Initialize baseline without reindexing (sets best_ratio for sufficiently large indexes)
+-- Attest that the current state is a healthy baseline for sufficiently large indexes.
 select leandex.do_force_populate_index_stats('<TARGET_DB>', null, null, null);
 
 -- List indexes that periodic(true) would process under current thresholds
 select
   schemaname, relname, indexrelname,
   pg_size_pretty(indexsize) as size,
-  round(estimated_bloat::numeric, 2) as bloat_x
+  round(estimated_bloat::numeric, 2) as bloat_x,
+  baseline_source
 from leandex.get_index_bloat_estimates('<TARGET_DB>')
 where indexsize >= pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_size_threshold'))
   and coalesce(leandex.get_setting(datname, schemaname, relname, indexrelname, 'skip')::boolean, false) = false
@@ -203,8 +204,9 @@ call leandex.periodic(true,false);
 ```
 
 Notes:
-- Baseline means best_ratio is set to current size/tuples. Immediately after baseline, estimated_bloat is ~1.0 by definition; new bloat is detected as indexes grow from that baseline.
-- Small indexes below `minimum_reliable_index_size` (default 128kB) are not assigned best_ratio by baseline to avoid noise. This does not affect candidates because `index_size_threshold` (default 10MB) filters them anyway.
+- `baseline_source = 'first_seen'` means the initial observation is untrusted; `estimated_bloat` is null until the baseline is promoted.
+- Trusted baselines are `forced`, `reindexed`, or `improved`.
+- Small indexes below `minimum_reliable_index_size` (default 128kB) have no reliable baseline, so `estimated_bloat` is null. This does not affect normal candidates because `index_size_threshold` (default 10MB) filters them anyway.
 
 Exclude service schemas if desired (e.g., TOAST or TimescaleDB internals):
 

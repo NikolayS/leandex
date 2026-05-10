@@ -189,6 +189,51 @@ begin
     coalesce(_max_bloat, 0), _threshold;
 end $$;
 
+-- 7b. Regression: forcing stats after bloat must not overwrite a healthy baseline.
+do $$
+declare
+  _target_db text;
+  _bloat_before float;
+  _bloat_after float;
+  _ratio_before real;
+  _ratio_after real;
+begin
+  select database_name into _target_db
+  from leandex.target_databases
+  where enabled
+  limit 1;
+
+  select max(e.estimated_bloat), max(s.best_ratio)
+  into _bloat_before, _ratio_before
+  from leandex.get_index_bloat_estimates(_target_db) as e
+  join leandex.index_latest_state as s using (datname, schemaname, relname, indexrelname)
+  where e.schemaname = 'test_leandex_app';
+
+  if _bloat_before is null or _bloat_before < 1.05 then
+    raise exception 'FAIL: regression precondition unmet; bloat before force=%', _bloat_before;
+  end if;
+
+  perform leandex.do_force_populate_index_stats(_target_db, 'test_leandex_app', null, null);
+  call leandex.periodic(false);
+
+  select max(e.estimated_bloat), max(s.best_ratio)
+  into _bloat_after, _ratio_after
+  from leandex.get_index_bloat_estimates(_target_db) as e
+  join leandex.index_latest_state as s using (datname, schemaname, relname, indexrelname)
+  where e.schemaname = 'test_leandex_app';
+
+  if _bloat_after is null or _bloat_after < _bloat_before * 0.95 then
+    raise exception 'FAIL: forced stats destroyed baseline (bloat before=%, after=%)', _bloat_before, _bloat_after;
+  end if;
+
+  if _ratio_after > _ratio_before * 1.001 then
+    raise exception 'FAIL: forced stats raised best_ratio (before=%, after=%)', _ratio_before, _ratio_after;
+  end if;
+
+  raise notice 'PASS: forced stats are non-destructive (bloat %→%, ratio %→%)',
+    _bloat_before, _bloat_after, _ratio_before, _ratio_after;
+end $$;
+
 -- 8. Cleanup test data
 do $$
 begin
