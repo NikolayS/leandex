@@ -604,8 +604,8 @@ $body$ language sql stable;
 /*
  * Compute the (best_ratio, baseline_source, baseline_set_at, last_reindex_at)
  * tuple to write for one index, given previous values plus the new
- * observation. Pure function — same inputs always yield same outputs. Called
- * from _record_indexes_info both for INSERTs (prev_* are NULL) and UPDATEs.
+ * observation. Called from _record_indexes_info both for INSERTs (prev_* are
+ * NULL) and UPDATEs.
  *
  * Invariants:
  *   - best_ratio is non-increasing except via _post_reindex (which throws

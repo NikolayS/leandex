@@ -171,13 +171,16 @@ create table leandex.index_latest_state (
   estimated_tuples bigint not null,
   best_ratio real,
   /*
-   * Provenance of best_ratio. NULL while best_ratio is NULL (index too small).
+   * Provenance of the baseline observation.
    *   'first_seen' — initial observation; baseline may itself reflect bloat,
    *                  so estimated_bloat is reported as NULL until promoted
    *   'reindexed'  — stamped after a successful leandex-driven REINDEX
    *   'forced'     — operator-attested clean state via do_force_populate_index_stats
    *   'improved'   — least() reduced best_ratio after a 'first_seen' observation,
    *                  proving the original baseline was not the minimum
+   *
+   * baseline_source is normally NULL with best_ratio NULL (index too small),
+   * except a too-small post-reindex index may still be stamped 'reindexed'.
    */
   baseline_source text check (baseline_source in ('first_seen', 'reindexed', 'forced', 'improved')),
   baseline_set_at timestamptz,
