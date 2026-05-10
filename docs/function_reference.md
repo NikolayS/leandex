@@ -44,13 +44,15 @@ returns table(
     relname name,
     indexrelname name,
     indexsize bigint,
-    estimated_bloat real
+    estimated_bloat real,
+    baseline_source text
 )
 ```
 
 Notes:
 - `estimated_bloat` is computed as `indexsize / (best_ratio * estimated_tuples)` using cached state in `leandex.index_latest_state`.
-- Immediately after baseline initialization (see `do_force_populate_index_stats`) `estimated_bloat` will be ~1.0 by definition; it grows as indexes bloat further.
+- `estimated_bloat` is null when the baseline is untrusted (`baseline_source = 'first_seen'`) or unavailable (index is below `minimum_reliable_index_size`).
+- Trusted baselines come from `do_force_populate_index_stats` (`forced`), leandex-driven reindexing (`reindexed`), or an observed ratio improvement (`improved`).
 
 ### Non-Superuser Mode Functions
 

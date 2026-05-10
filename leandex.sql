@@ -1400,11 +1400,9 @@ begin
   for _index in
     select datname, schemaname, relname, indexrelname, indexsize, estimated_bloat
     /*
-     * index_size_threshold filtering happens inside get_index_bloat_estimates.
      * _force ignores index_rebuild_scale_factor, but indexes below
      * index_size_threshold or explicitly skipped via config are always
      * ignored — even with _force=true.
-     * TODO: revisit this filter precedence.
      */
     from leandex.get_index_bloat_estimates(_datname)
     where

@@ -52,9 +52,9 @@ select * from leandex.check_environment();
 -- where:
 --   indexsize         = pg_relation_size(index)
 --   estimated_tuples  = greatest(1, reltuples)
---   best_ratio        = baseline size-per-tuple learned after REINDEX
+--   best_ratio        = best observed size-per-tuple baseline
 ```
-- Notes: `best_ratio` is updated from reindex history (`indexsize_after / greatest(1, estimated_tuples)`) and can be initialized via `do_force_populate_index_stats` for indexes larger than `minimum_reliable_index_size`. If `best_ratio` is unknown, `estimated_bloat` is null and such indexes are prioritized for reindex. Reindexing is triggered when `estimated_bloat ≥ index_rebuild_scale_factor`.
+- Notes: `best_ratio` is initialized from observations, but bloat is reported only for trusted baselines: `forced`, `reindexed`, or `improved`. `estimated_bloat` is null for untrusted first observations or indexes below `minimum_reliable_index_size`; normal reindexing prioritizes those only after `index_size_threshold` and `skip` filters pass. Reindexing is triggered when `estimated_bloat` is null or `estimated_bloat ≥ index_rebuild_scale_factor`.
 
 - **Why wasn't an index reindexed?** - Below `index_rebuild_scale_factor`, under `index_size_threshold`, explicitly `skip=true`, or target DB `enabled=false`.
 
@@ -63,9 +63,10 @@ select * from leandex.check_environment();
 select
   indexrelname,
   pg_size_pretty(indexsize) as current_size,
-  round(estimated_bloat::numeric, 2) as bloat_x
+  round(estimated_bloat::numeric, 2) as bloat_x,
+  baseline_source
 from leandex.get_index_bloat_estimates('<db>')
-order by estimated_bloat desc nulls last
+order by estimated_bloat desc nulls first
 limit 50;  -- adjust as needed
 ```
 

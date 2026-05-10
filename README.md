@@ -197,10 +197,20 @@ order by estimated_bloat desc nulls first
 limit 20;
 ```
 
-`estimated_bloat = NULL` means "untrusted baseline — see `baseline_source`." The default `periodic(true)` rebuild gate treats NULL bloat as a signal to rebuild and re-establish a clean baseline; on a fresh install this is the desired self-heal. To preview what `periodic(true)` would do, run:
+`estimated_bloat = NULL` means the baseline is untrusted or unavailable — check `baseline_source` and index size. The default `periodic(true)` rebuild gate treats NULL bloat as a signal to rebuild after the normal size/skip filters pass.
+
+To preview candidates, refresh inventory and query with the same filters:
 
 ```sql
 call leandex.periodic(false);
+
+select *
+from leandex.get_index_bloat_estimates('appdb')
+where indexsize >= pg_size_bytes(leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_size_threshold'))
+  and leandex.get_setting(datname, schemaname, relname, indexrelname, 'skip')::boolean is distinct from true
+  and (estimated_bloat is null
+    or estimated_bloat >= leandex.get_setting(datname, schemaname, relname, indexrelname, 'index_rebuild_scale_factor')::float)
+order by estimated_bloat desc nulls first;
 ```
 
 Run one maintenance cycle that may rebuild eligible indexes:
