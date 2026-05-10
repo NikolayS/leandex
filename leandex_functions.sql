@@ -669,7 +669,10 @@ begin
   baseline_source := _prev_baseline_source;
   baseline_set_at := _prev_baseline_set_at;
 
-  if _prev_baseline_source = 'first_seen' and (_force_populate or _ratio < _prev_best_ratio) then
+  if _force_populate and _ratio < _prev_best_ratio then
+    baseline_source := 'forced';
+    baseline_set_at := _ts;
+  elsif _prev_baseline_source = 'first_seen' and (_force_populate or _ratio < _prev_best_ratio) then
     baseline_source := case when _force_populate then 'forced' else 'improved' end;
     baseline_set_at := _ts;
   end if;
