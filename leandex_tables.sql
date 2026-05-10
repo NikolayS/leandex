@@ -222,7 +222,7 @@ create table leandex.tables_version (
 
 create unique index tables_version_single_row on leandex.tables_version((version is not null));
 
-insert into leandex.tables_version values(2);
+insert into leandex.tables_version values(1);
 
 
 /*

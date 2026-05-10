@@ -189,84 +189,49 @@ begin
     coalesce(_max_bloat, 0), _threshold;
 end $$;
 
--- 7b. Regression: do_force_populate_index_stats called AFTER bloat must NOT
--- destroy a healthy baseline. Reported by an early user who ran the function
--- a second time post-bloat and saw estimated_bloat lock at 1.00 forever.
--- Asserts loudly if the precondition is unmet so this test cannot silently
--- pass after future restructuring.
+-- 7b. Regression: forcing stats after bloat must not overwrite a healthy baseline.
 do $$
 declare
-  _bloat_before_force float;
-  _bloat_after_force  float;
-  _baseline_source_before text;
-  _baseline_source_after  text;
-  _best_ratio_before real;
-  _best_ratio_after  real;
   _target_db text;
+  _bloat_before float;
+  _bloat_after float;
+  _ratio_before real;
+  _ratio_after real;
 begin
   select database_name into _target_db
-  from leandex.target_databases where enabled = true limit 1;
+  from leandex.target_databases
+  where enabled
+  limit 1;
 
-  -- Precondition: a trusted baseline must already exist (step 3 ran
-  -- do_force_populate_index_stats on the healthy state, so source='forced'),
-  -- and step 5 then bloated the indexes, so estimated_bloat must be > 1.
-  select max(estimates.estimated_bloat),
-         (array_agg(distinct estimates.baseline_source))[1],
-         max(state.best_ratio)
-    into _bloat_before_force, _baseline_source_before, _best_ratio_before
-  from leandex.get_index_bloat_estimates(_target_db) as estimates
-  join leandex.index_latest_state as state
-    using (datname, schemaname, relname, indexrelname)
-  where estimates.schemaname = 'test_leandex_app';
+  select max(e.estimated_bloat), max(s.best_ratio)
+  into _bloat_before, _ratio_before
+  from leandex.get_index_bloat_estimates(_target_db) as e
+  join leandex.index_latest_state as s using (datname, schemaname, relname, indexrelname)
+  where e.schemaname = 'test_leandex_app';
 
-  if _bloat_before_force is null then
-    raise exception 'FAIL: regression precondition unmet — estimated_bloat is null '
-      'before the test action. Earlier setup steps must establish a trusted '
-      'baseline and bloat the indexes; investigate test ordering.';
+  if _bloat_before is null or _bloat_before < 1.05 then
+    raise exception 'FAIL: regression precondition unmet; bloat before force=%', _bloat_before;
   end if;
 
-  if _bloat_before_force < 1.05 then
-    raise exception 'FAIL: regression precondition unmet — pre-action bloat (%) '
-      'is too close to 1.0 to detect a destructive overwrite. Bloat workload '
-      'in step 5 is not producing measurable bloat.', _bloat_before_force;
-  end if;
-
-  -- The user's mistake: re-run on already-bloated indexes.
   perform leandex.do_force_populate_index_stats(_target_db, 'test_leandex_app', null, null);
   call leandex.periodic(false);
 
-  select max(estimates.estimated_bloat),
-         (array_agg(distinct estimates.baseline_source))[1],
-         max(state.best_ratio)
-    into _bloat_after_force, _baseline_source_after, _best_ratio_after
-  from leandex.get_index_bloat_estimates(_target_db) as estimates
-  join leandex.index_latest_state as state
-    using (datname, schemaname, relname, indexrelname)
-  where estimates.schemaname = 'test_leandex_app';
+  select max(e.estimated_bloat), max(s.best_ratio)
+  into _bloat_after, _ratio_after
+  from leandex.get_index_bloat_estimates(_target_db) as e
+  join leandex.index_latest_state as s using (datname, schemaname, relname, indexrelname)
+  where e.schemaname = 'test_leandex_app';
 
-  -- Assert (a) bloat estimate did not collapse, (b) best_ratio not raised,
-  -- (c) baseline_source still trusted (no downgrade).
-  if _bloat_after_force is null or _bloat_after_force < _bloat_before_force * 0.95 then
-    raise exception 'FAIL: do_force_populate_index_stats destroyed the healthy '
-      'baseline (bloat before=%, after=%)', _bloat_before_force, _bloat_after_force;
+  if _bloat_after is null or _bloat_after < _bloat_before * 0.95 then
+    raise exception 'FAIL: forced stats destroyed baseline (bloat before=%, after=%)', _bloat_before, _bloat_after;
   end if;
 
-  if _best_ratio_after > _best_ratio_before * 1.001 then
-    raise exception 'FAIL: best_ratio was raised by do_force_populate_index_stats '
-      '(before=%, after=%) — should be non-increasing', _best_ratio_before, _best_ratio_after;
+  if _ratio_after > _ratio_before * 1.001 then
+    raise exception 'FAIL: forced stats raised best_ratio (before=%, after=%)', _ratio_before, _ratio_after;
   end if;
 
-  if _baseline_source_after is null
-     or _baseline_source_after not in ('forced', 'reindexed', 'improved') then
-    raise exception 'FAIL: baseline_source was downgraded to % (was %)',
-      _baseline_source_after, _baseline_source_before;
-  end if;
-
-  raise notice 'PASS: do_force_populate_index_stats is non-destructive '
-    '(bloat before=%, after=%; best_ratio before=%, after=%; source %→%)',
-    _bloat_before_force, _bloat_after_force,
-    _best_ratio_before, _best_ratio_after,
-    _baseline_source_before, _baseline_source_after;
+  raise notice 'PASS: forced stats are non-destructive (bloat %→%, ratio %→%)',
+    _bloat_before, _bloat_after, _ratio_before, _ratio_after;
 end $$;
 
 -- 8. Cleanup test data

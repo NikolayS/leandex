@@ -231,7 +231,7 @@ create table leandex.tables_version (
 
 create unique index tables_version_single_row on leandex.tables_version((version is not null));
 
-insert into leandex.tables_version values(2);
+insert into leandex.tables_version values(1);
 
 
 /*
@@ -546,7 +546,7 @@ create function leandex._check_structure_version() returns void as
 $body$
 declare
   _tables_version integer;
-  _required_version integer := 2;
+  _required_version integer := 1;
 begin
   select version into strict _tables_version from leandex.tables_version;
 
@@ -573,7 +573,7 @@ create function leandex.check_update_structure_version() returns void as
 $body$
 declare
    _tables_version integer;
-   _required_version integer := 2;
+   _required_version integer := 1;
 begin
   select version into strict _tables_version from leandex.tables_version;
 
@@ -886,61 +886,48 @@ create function leandex._compute_baseline_update(
   out last_reindex_at timestamptz
 ) as $body$
 declare
-  _is_reliable boolean := _new_indexsize > _min_reliable_bytes;
-  _new_ratio real := _new_indexsize::real / nullif(_new_estimated_tuples, 0)::real;
+  _ratio real := _new_indexsize::real / nullif(_new_estimated_tuples, 0)::real;
+  _reliable boolean := _new_indexsize > _min_reliable_bytes;
+  _ts timestamptz := now();
 begin
-  /* _post_reindex re-establishes the baseline regardless of prior state.
-     Stamp 'reindexed' even when the rebuilt index is too small to compute
-     best_ratio — the row faithfully reflects "leandex did rebuild this." */
+  last_reindex_at := _prev_last_reindex_at;
+
   if _post_reindex then
-    best_ratio := case when _is_reliable then _new_ratio end;
+    best_ratio := case when _reliable then _ratio end;
     baseline_source := 'reindexed';
-    baseline_set_at := now();
-    last_reindex_at := now();
+    baseline_set_at := _ts;
+    last_reindex_at := _ts;
     return;
   end if;
 
-  last_reindex_at := _prev_last_reindex_at;
-
-  /* Outside _post_reindex, never lose an existing baseline merely because
-     the index temporarily fell under the reliability threshold. */
-  if not _is_reliable then
+  if not _reliable then
     best_ratio := _prev_best_ratio;
     baseline_source := _prev_baseline_source;
     baseline_set_at := _prev_baseline_set_at;
     return;
   end if;
 
-  /* No prior baseline (fresh INSERT, or previous observation was too small).
-     Initialize from the current ratio. */
   if _prev_best_ratio is null then
-    best_ratio := _new_ratio;
+    best_ratio := _ratio;
     baseline_source := case
-      /* preserve post-reindex provenance carried over from a too-small run */
       when _prev_baseline_source = 'reindexed' then 'reindexed'
       when _force_populate then 'forced'
       else 'first_seen'
     end;
-    baseline_set_at := now();
+    baseline_set_at := _ts;
     return;
   end if;
 
-  /* Existing trusted baseline. Non-increasing; relabel only on the two
-     promotion events. */
-  best_ratio := least(_prev_best_ratio, _new_ratio);
+  best_ratio := least(_prev_best_ratio, _ratio);
+  baseline_source := _prev_baseline_source;
+  baseline_set_at := _prev_baseline_set_at;
 
-  if _force_populate and _prev_baseline_source = 'first_seen' then
-    baseline_source := 'forced';
-    baseline_set_at := now();
-  elsif _prev_baseline_source = 'first_seen' and _new_ratio < _prev_best_ratio then
-    baseline_source := 'improved';
-    baseline_set_at := now();
-  else
-    baseline_source := _prev_baseline_source;
-    baseline_set_at := _prev_baseline_set_at;
+  if _prev_baseline_source = 'first_seen' and (_force_populate or _ratio < _prev_best_ratio) then
+    baseline_source := case when _force_populate then 'forced' else 'improved' end;
+    baseline_set_at := _ts;
   end if;
 end;
-$body$ language plpgsql immutable;
+$body$ language plpgsql stable;
 
 
 /*
